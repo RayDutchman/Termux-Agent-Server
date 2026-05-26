@@ -416,74 +416,7 @@ def make_error_stream(message):
     yield b"data: [DONE]\n\n"
 
 
-# ==== 7. 流式响应中解析 tool_calls ====
-
-def _collect_stream(upstream_resp):
-    """
-    消费上游流式响应，返回 (chunks, tool_calls, content)。
-    chunks: 原始字节列表，可直接透传给客户端。
-    tool_calls: 拼接完整的 tool_calls 列表，无则为 None。
-    content: 拼接完整的文本内容。
-    """
-    chunks = []
-    buf = b""
-    # 用于拼接 tool_calls（流式下 arguments 是分片的）
-    tc_map = {}   # index -> {id, name, arguments_parts}
-    content_parts = []
-    finish_reason = None
-
-    try:
-        for chunk in upstream_resp.iter_content(chunk_size=4096):
-            if not chunk:
-                continue
-            chunks.append(chunk)
-            buf += chunk
-            while b"\n" in buf:
-                line_bytes, buf = buf.split(b"\n", 1)
-                line = line_bytes.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:") or "[DONE]" in line:
-                    continue
-                try:
-                    data = json.loads(line[5:].strip())
-                    choice = data.get("choices", [{}])[0]
-                    delta = choice.get("delta", {})
-                    finish_reason = choice.get("finish_reason") or finish_reason
-
-                    # 收集文本内容
-                    if delta.get("content"):
-                        content_parts.append(delta["content"])
-
-                    # 拼接 tool_calls（流式下每个 chunk 只有部分 arguments）
-                    for tc in delta.get("tool_calls", []):
-                        idx = tc.get("index", 0)
-                        if idx not in tc_map:
-                            tc_map[idx] = {
-                                "id": tc.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": tc.get("function", {}).get("name", ""),
-                                    "arguments": ""
-                                }
-                            }
-                        # arguments 是分片追加的
-                        tc_map[idx]["function"]["arguments"] += \
-                            tc.get("function", {}).get("arguments", "")
-                        # id 和 name 可能在后续 chunk 里才出现
-                        if tc.get("id"):
-                            tc_map[idx]["id"] = tc["id"]
-                        if tc.get("function", {}).get("name"):
-                            tc_map[idx]["function"]["name"] = tc["function"]["name"]
-                except Exception:
-                    pass
-    finally:
-        upstream_resp.close()
-
-    tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
-    content = "".join(content_parts)
-    return chunks, tool_calls, content, finish_reason
-
-
-# ==== 8. 路由 ====
+# ==== 7. 路由 ====
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
@@ -543,32 +476,75 @@ def chat_completions():
             content_type='application/json; charset=utf-8'
         )
 
-    # ---- 流式模式：第一轮也用流式，避免 Chatbox 超时 ----
+    # ---- 流式模式：边收边发，立刻响应 Chatbox ----
     def _generate():
-        # 第一轮流式请求
         try:
             first_resp = call_llm_stream(messages, tools=tools_schema)
         except RuntimeError as e:
             yield from make_error_stream(str(e))
             return
 
-        # 消费第一轮流，拼接完整响应
-        chunks, tool_calls, content, finish_reason = _collect_stream(first_resp)
+        # 边收边发，同时解析 tool_calls
+        buf = b""
+        tc_map = {}
+        content_parts = []
+
+        try:
+            for chunk in first_resp.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+                # 立刻转发给 Chatbox，不等待
+                yield chunk
+                # 同时解析 SSE 行，收集 tool_calls 和 content
+                buf += chunk
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:") or "[DONE]" in line:
+                        continue
+                    try:
+                        data = json.loads(line[5:].strip())
+                        choice0 = data.get("choices", [{}])[0]
+                        delta = choice0.get("delta", {})
+                        if delta.get("content"):
+                            content_parts.append(delta["content"])
+                        for tc in delta.get("tool_calls", []):
+                            idx = tc.get("index", 0)
+                            if idx not in tc_map:
+                                tc_map[idx] = {
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""}
+                                }
+                            tc_map[idx]["function"]["arguments"] += \
+                                tc.get("function", {}).get("arguments", "")
+                            if tc.get("id"):
+                                tc_map[idx]["id"] = tc["id"]
+                            if tc.get("function", {}).get("name"):
+                                tc_map[idx]["function"]["name"] = tc["function"]["name"]
+                    except Exception:
+                        pass
+        except Exception as e:
+            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
+            yield b"data: [DONE]\n\n"
+            return
+        finally:
+            first_resp.close()
+
+        content = "".join(content_parts)
+        tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
 
         if not tool_calls:
-            # 无工具调用：直接把第一轮的 chunks 透传给 Chatbox
-            log.info("[stream] 无工具调用，直接透传")
+            # 无工具调用，第一轮已全部发完，存历史即可
+            log.info("[stream] 无工具调用，完成")
             if conv_id:
                 _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
-            for c in chunks:
-                yield c
             return
 
-        # 有工具调用：执行工具，发第二轮流式请求
+        # 有工具调用：第一轮内容已发给 Chatbox（通常是空的，模型调工具时不输出文本）
+        # 执行工具，发第二轮，追加到同一个流里
         log.info(f"[stream] 检测到 {len(tool_calls)} 个工具调用，执行中...")
-
-        # 先给 Chatbox 发一个占位 chunk，保持连接活跃
-        yield _make_sse_chunk(content="", role="assistant")
+        yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n")
 
         assistant_msg = {
             "role": "assistant",
@@ -578,7 +554,7 @@ def chat_completions():
         messages.append(assistant_msg)
         tool_results = execute_all_tool_calls(tool_calls)
         messages.extend(tool_results)
-        log.info(f"[stream] 工具执行完毕，发起第二轮流式请求")
+        log.info("[stream] 工具执行完毕，发起第二轮流式请求")
 
         try:
             second_resp = call_llm_stream(messages)
@@ -586,17 +562,16 @@ def chat_completions():
             yield from make_error_stream(str(e))
             return
 
-        # 透传第二轮流式响应，同时收集内容存历史
         collected = []
-        buf = b""
+        buf2 = b""
         try:
             for chunk in second_resp.iter_content(chunk_size=4096):
                 if not chunk:
                     continue
                 yield chunk
-                buf += chunk
-                while b"\n" in buf:
-                    line_bytes, buf = buf.split(b"\n", 1)
+                buf2 += chunk
+                while b"\n" in buf2:
+                    line_bytes, buf2 = buf2.split(b"\n", 1)
                     line = line_bytes.decode("utf-8", errors="replace").strip()
                     if line.startswith("data:") and "[DONE]" not in line:
                         try:
@@ -612,8 +587,7 @@ def chat_completions():
         finally:
             second_resp.close()
             if conv_id:
-                final_content = "".join(collected)
-                _save_session(conv_id, messages + [{"role": "assistant", "content": final_content}])
+                _save_session(conv_id, messages + [{"role": "assistant", "content": "".join(collected)}])
 
     return Response(_generate(), content_type='text/event-stream; charset=utf-8')
 
