@@ -3,10 +3,18 @@ import glob
 import json
 import time
 import shutil
+import logging
 import threading
 import subprocess
 import requests
 from flask import Flask, request, jsonify, Response
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -274,10 +282,14 @@ def call_llm_sync(messages, tools=None):
     payload = {"model": MODEL_NAME, "messages": messages, "stream": False}
     if tools:
         payload["tools"] = tools
+    t0 = time.time()
+    log.info(f"[sync] 发送请求，消息数={len(messages)}, 带工具={tools is not None}")
     try:
         resp = requests.post(API_URL, json=payload, headers=make_headers(), timeout=120)
         resp.raise_for_status()
-        return json.loads(resp.content.decode("utf-8"))
+        result = json.loads(resp.content.decode("utf-8"))
+        log.info(f"[sync] 完成，耗时={time.time()-t0:.1f}s")
+        return result
     except requests.exceptions.Timeout:
         raise RuntimeError("上游 LLM 请求超时")
     except requests.exceptions.HTTPError as e:
@@ -291,6 +303,7 @@ def call_llm_stream(messages, tools=None):
     payload = {"model": MODEL_NAME, "messages": messages, "stream": True}
     if tools:
         payload["tools"] = tools
+    log.info(f"[stream] 发送请求，消息数={len(messages)}")
     try:
         resp = requests.post(
             API_URL, json=payload, headers=make_headers(),
