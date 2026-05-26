@@ -416,17 +416,82 @@ def make_error_stream(message):
     yield b"data: [DONE]\n\n"
 
 
-# ==== 7. 路由 ====
+# ==== 7. 流式响应中解析 tool_calls ====
+
+def _collect_stream(upstream_resp):
+    """
+    消费上游流式响应，返回 (chunks, tool_calls, content)。
+    chunks: 原始字节列表，可直接透传给客户端。
+    tool_calls: 拼接完整的 tool_calls 列表，无则为 None。
+    content: 拼接完整的文本内容。
+    """
+    chunks = []
+    buf = b""
+    # 用于拼接 tool_calls（流式下 arguments 是分片的）
+    tc_map = {}   # index -> {id, name, arguments_parts}
+    content_parts = []
+    finish_reason = None
+
+    try:
+        for chunk in upstream_resp.iter_content(chunk_size=4096):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            buf += chunk
+            while b"\n" in buf:
+                line_bytes, buf = buf.split(b"\n", 1)
+                line = line_bytes.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:") or "[DONE]" in line:
+                    continue
+                try:
+                    data = json.loads(line[5:].strip())
+                    choice = data.get("choices", [{}])[0]
+                    delta = choice.get("delta", {})
+                    finish_reason = choice.get("finish_reason") or finish_reason
+
+                    # 收集文本内容
+                    if delta.get("content"):
+                        content_parts.append(delta["content"])
+
+                    # 拼接 tool_calls（流式下每个 chunk 只有部分 arguments）
+                    for tc in delta.get("tool_calls", []):
+                        idx = tc.get("index", 0)
+                        if idx not in tc_map:
+                            tc_map[idx] = {
+                                "id": tc.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": tc.get("function", {}).get("name", ""),
+                                    "arguments": ""
+                                }
+                            }
+                        # arguments 是分片追加的
+                        tc_map[idx]["function"]["arguments"] += \
+                            tc.get("function", {}).get("arguments", "")
+                        # id 和 name 可能在后续 chunk 里才出现
+                        if tc.get("id"):
+                            tc_map[idx]["id"] = tc["id"]
+                        if tc.get("function", {}).get("name"):
+                            tc_map[idx]["function"]["name"] = tc["function"]["name"]
+                except Exception:
+                    pass
+    finally:
+        upstream_resp.close()
+
+    tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
+    content = "".join(content_parts)
+    return chunks, tool_calls, content, finish_reason
+
+
+# ==== 8. 路由 ====
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
     chatbox_data = request.json or {}
     want_stream = chatbox_data.get("stream", False)
 
-    # Chatbox 用 conversation_id 标识会话，没有则退化为无记忆模式
     conv_id = chatbox_data.get("conversation_id") or chatbox_data.get("id") or ""
 
-    # 从请求中提取最新一条 user 消息
     incoming = [m for m in chatbox_data.get("messages", []) if m.get("role") != "system"]
     latest_user_msg = next((m for m in reversed(incoming) if m["role"] == "user"), None)
 
@@ -440,99 +505,117 @@ def chat_completions():
         )
     }
 
-    # 用服务端历史重建完整 messages（包含历史 tool_calls 和 tool results）
     server_history = _get_session(conv_id) if conv_id else []
     if latest_user_msg and (not server_history or server_history[-1] != latest_user_msg):
         server_history.append(latest_user_msg)
 
     messages = [system_prompt] + server_history
 
-    # 第一轮非流式，拿完整 tool_calls
-    try:
-        first_data = call_llm_sync(messages, tools=tools_schema)
-    except RuntimeError as e:
-        if want_stream:
-            return Response(make_error_stream(str(e)), content_type='text/event-stream; charset=utf-8')
-        return jsonify({"error": str(e)}), 502
-
-    choice = safe_get_choice(first_data)
-
-    # ---- 有工具调用 ----
-    if choice.get("tool_calls"):
-        # 把 assistant 的 tool_calls 消息存入历史
-        messages.append(choice)
-        tool_results = execute_all_tool_calls(choice["tool_calls"])
-        messages.extend(tool_results)
-
+    # ---- 非流式模式（逻辑不变）----
+    if not want_stream:
         try:
-            if want_stream:
-                # 第二轮流式，工具结果已在 messages 里
-                stream_resp = call_llm_stream(messages)
+            first_data = call_llm_sync(messages, tools=tools_schema)
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 502
 
-                def _stream_and_save():
-                    """透传流式，同时收集 assistant 回复内容用于存历史。"""
-                    collected = []
-                    buf = b""
-                    try:
-                        for chunk in stream_resp.iter_content(chunk_size=4096):
-                            if not chunk:
-                                continue
-                            yield chunk
-                            # 在缓冲区里解析完整的 SSE 行，收集 delta content
-                            buf += chunk
-                            while b"\n" in buf:
-                                line_bytes, buf = buf.split(b"\n", 1)
-                                line = line_bytes.decode("utf-8", errors="replace").strip()
-                                if line.startswith("data:") and "[DONE]" not in line:
-                                    try:
-                                        chunk_data = json.loads(line[5:].strip())
-                                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                                        if delta.get("content"):
-                                            collected.append(delta["content"])
-                                    except Exception:
-                                        pass
-                    except Exception as e:
-                        yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
-                        yield b"data: [DONE]\n\n"
-                    finally:
-                        stream_resp.close()
-                        # 把完整的 assistant 回复存入 session 历史
-                        if conv_id:
-                            final_content = "".join(collected)
-                            final_messages = messages + [{"role": "assistant", "content": final_content}]
-                            _save_session(conv_id, final_messages)
+        choice = safe_get_choice(first_data)
 
-                return Response(_stream_and_save(), content_type='text/event-stream; charset=utf-8')
-
-            else:
+        if choice.get("tool_calls"):
+            messages.append(choice)
+            tool_results = execute_all_tool_calls(choice["tool_calls"])
+            messages.extend(tool_results)
+            log.info(f"[tool] 执行了 {len(choice['tool_calls'])} 个工具，发起第二轮请求")
+            try:
                 second_data = call_llm_sync(messages)
-                # 存历史
                 if conv_id:
-                    assistant_msg = safe_get_choice(second_data)
-                    final_messages = messages + [assistant_msg] if assistant_msg else messages
-                    _save_session(conv_id, final_messages)
+                    _save_session(conv_id, messages + [safe_get_choice(second_data)])
                 return Response(
                     json.dumps(second_data, ensure_ascii=False),
                     content_type='application/json; charset=utf-8'
                 )
+            except RuntimeError as e:
+                return jsonify({"error": str(e)}), 502
+
+        if conv_id:
+            _save_session(conv_id, messages + [choice])
+        return Response(
+            json.dumps(first_data, ensure_ascii=False),
+            content_type='application/json; charset=utf-8'
+        )
+
+    # ---- 流式模式：第一轮也用流式，避免 Chatbox 超时 ----
+    def _generate():
+        # 第一轮流式请求
+        try:
+            first_resp = call_llm_stream(messages, tools=tools_schema)
         except RuntimeError as e:
-            if want_stream:
-                return Response(make_error_stream(str(e)), content_type='text/event-stream; charset=utf-8')
-            return jsonify({"error": str(e)}), 502
+            yield from make_error_stream(str(e))
+            return
 
-    # ---- 无工具调用 ----
-    # 存历史
-    if conv_id:
-        final_messages = messages + [choice] if choice else messages
-        _save_session(conv_id, final_messages)
+        # 消费第一轮流，拼接完整响应
+        chunks, tool_calls, content, finish_reason = _collect_stream(first_resp)
 
-    if want_stream:
-        return Response(wrap_as_stream(first_data), content_type='text/event-stream; charset=utf-8')
+        if not tool_calls:
+            # 无工具调用：直接把第一轮的 chunks 透传给 Chatbox
+            log.info("[stream] 无工具调用，直接透传")
+            if conv_id:
+                _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
+            for c in chunks:
+                yield c
+            return
 
-    return Response(
-        json.dumps(first_data, ensure_ascii=False),
-        content_type='application/json; charset=utf-8'
-    )
+        # 有工具调用：执行工具，发第二轮流式请求
+        log.info(f"[stream] 检测到 {len(tool_calls)} 个工具调用，执行中...")
+
+        # 先给 Chatbox 发一个占位 chunk，保持连接活跃
+        yield _make_sse_chunk(content="", role="assistant")
+
+        assistant_msg = {
+            "role": "assistant",
+            "content": content or None,
+            "tool_calls": tool_calls
+        }
+        messages.append(assistant_msg)
+        tool_results = execute_all_tool_calls(tool_calls)
+        messages.extend(tool_results)
+        log.info(f"[stream] 工具执行完毕，发起第二轮流式请求")
+
+        try:
+            second_resp = call_llm_stream(messages)
+        except RuntimeError as e:
+            yield from make_error_stream(str(e))
+            return
+
+        # 透传第二轮流式响应，同时收集内容存历史
+        collected = []
+        buf = b""
+        try:
+            for chunk in second_resp.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+                yield chunk
+                buf += chunk
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                    if line.startswith("data:") and "[DONE]" not in line:
+                        try:
+                            d = json.loads(line[5:].strip())
+                            delta = d.get("choices", [{}])[0].get("delta", {})
+                            if delta.get("content"):
+                                collected.append(delta["content"])
+                        except Exception:
+                            pass
+        except Exception as e:
+            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
+            yield b"data: [DONE]\n\n"
+        finally:
+            second_resp.close()
+            if conv_id:
+                final_content = "".join(collected)
+                _save_session(conv_id, messages + [{"role": "assistant", "content": final_content}])
+
+    return Response(_generate(), content_type='text/event-stream; charset=utf-8')
 
 
 @app.route('/v1/sessions', methods=['DELETE'])
