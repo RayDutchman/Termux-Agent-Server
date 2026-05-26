@@ -484,31 +484,37 @@ def chat_completions():
             yield from make_error_stream(str(e))
             return
 
-        # 边收边发，同时解析 tool_calls
+        # 边解析边选择性转发：
+        # - 纯文本 content chunk → 立刻转发给 Chatbox
+        # - tool_calls chunk → 静默丢弃，不发给 Chatbox（避免 Chatbox 自己的工具系统拦截）
         buf = b""
         tc_map = {}
         content_parts = []
+        resp_id = ""
+        has_tool_calls = False
 
         try:
-            for chunk in first_resp.iter_content(chunk_size=4096):
-                if not chunk:
+            for raw_chunk in first_resp.iter_content(chunk_size=4096):
+                if not raw_chunk:
                     continue
-                # 立刻转发给 Chatbox，不等待
-                yield chunk
-                # 同时解析 SSE 行，收集 tool_calls 和 content
-                buf += chunk
+                buf += raw_chunk
                 while b"\n" in buf:
                     line_bytes, buf = buf.split(b"\n", 1)
                     line = line_bytes.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:") or "[DONE]" in line:
+                    if not line.startswith("data:"):
+                        continue
+                    if "[DONE]" in line:
                         continue
                     try:
                         data = json.loads(line[5:].strip())
+                        if not resp_id:
+                            resp_id = data.get("id", "")
                         choice0 = data.get("choices", [{}])[0]
                         delta = choice0.get("delta", {})
-                        if delta.get("content"):
-                            content_parts.append(delta["content"])
+
+                        # 收集 tool_calls（不转发）
                         for tc in delta.get("tool_calls", []):
+                            has_tool_calls = True
                             idx = tc.get("index", 0)
                             if idx not in tc_map:
                                 tc_map[idx] = {
@@ -522,6 +528,12 @@ def chat_completions():
                                 tc_map[idx]["id"] = tc["id"]
                             if tc.get("function", {}).get("name"):
                                 tc_map[idx]["function"]["name"] = tc["function"]["name"]
+
+                        # 只转发纯文本 content
+                        if delta.get("content") and not has_tool_calls:
+                            content_parts.append(delta["content"])
+                            yield (line + "\n\n").encode("utf-8")
+
                     except Exception:
                         pass
         except Exception as e:
@@ -535,16 +547,17 @@ def chat_completions():
         tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
 
         if not tool_calls:
-            # 无工具调用，第一轮已全部发完，存历史即可
+            # 无工具调用，补发结束 chunk
             log.info("[stream] 无工具调用，完成")
             if conv_id:
                 _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
+            yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id)
+            yield b"data: [DONE]\n\n"
             return
 
-        # 有工具调用：第一轮内容已发给 Chatbox（通常是空的，模型调工具时不输出文本）
-        # 执行工具，发第二轮，追加到同一个流里
+        # 有工具调用：执行工具，第二轮结果追加到同一个流
         log.info(f"[stream] 检测到 {len(tool_calls)} 个工具调用，执行中...")
-        yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n")
+        yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n", resp_id=resp_id)
 
         assistant_msg = {
             "role": "assistant",
