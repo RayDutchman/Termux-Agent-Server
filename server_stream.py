@@ -1,7 +1,9 @@
 import os
 import glob
 import json
+import time
 import shutil
+import threading
 import subprocess
 import requests
 from flask import Flask, request, jsonify, Response
@@ -16,20 +18,59 @@ MODEL_NAME = "claude-sonnet-4-6"
 
 DOWNLOAD_DIR = os.path.expanduser("~")
 
-# 工具输出最大长度，超出截断，避免撑爆 context
+# 工具输出最大字符数，超出截断
 TOOL_OUTPUT_MAX_CHARS = 8000
+# session 历史最多保留的轮数（一轮 = 一条 user + 一条 assistant）
+SESSION_MAX_TURNS = 20
 
 
-# ==== 2. 工具函数 ====
+# ==== 2. Session 历史管理 ====
+# 用 conversation_id（Chatbox 每个会话唯一）作为 key
+# 存储完整的 messages 列表，包含 tool_calls 和 tool results
+_sessions: dict = {}
+_sessions_lock = threading.Lock()
+
+
+def _get_session(conv_id: str) -> list:
+    with _sessions_lock:
+        return list(_sessions.get(conv_id, []))
+
+
+def _save_session(conv_id: str, messages: list):
+    """保存历史，超出 SESSION_MAX_TURNS 时裁剪最早的轮次（保留 system prompt）。"""
+    with _sessions_lock:
+        # messages[0] 是 system prompt，从 [1:] 开始算轮次
+        history = [m for m in messages if m.get("role") != "system"]
+        # 每轮至少包含 user + assistant，粗略按消息数裁剪
+        max_msgs = SESSION_MAX_TURNS * 4  # user + assistant(tool_calls) + tool + assistant
+        if len(history) > max_msgs:
+            history = history[-max_msgs:]
+        _sessions[conv_id] = history
+
+
+def _clear_session(conv_id: str):
+    with _sessions_lock:
+        _sessions.pop(conv_id, None)
+
+
+# ==== 3. 工具函数 ====
 
 def read_phone_file(filename):
     path = os.path.join(DOWNLOAD_DIR, filename)
     try:
         size = os.path.getsize(path)
-        if size > 500 * 1024:  # 超过 500KB 拒绝读取
+        if size > 500 * 1024:
             return f"错误: 文件 {filename} 过大 ({size // 1024}KB)，请指定更小的文件"
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
+        # 优先 UTF-8，失败后降级 latin-1（保证不抛异常）
+        for enc in ("utf-8", "gbk", "latin-1"):
+            try:
+                with open(path, "r", encoding=enc) as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                continue
+        return f"错误: 无法以任何已知编码读取文件 {filename}"
+    except FileNotFoundError:
+        return f"错误: 文件不存在: {filename}"
     except Exception as e:
         return f"错误: 无法读取文件 {filename}。原因: {str(e)}"
 
@@ -37,7 +78,8 @@ def read_phone_file(filename):
 def write_phone_file(filename, content):
     path = os.path.join(DOWNLOAD_DIR, filename)
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return f"成功: 已保存至 {path}"
     except Exception as e:
@@ -45,7 +87,6 @@ def write_phone_file(filename, content):
 
 
 def execute_local_command(command=None, **kwargs):
-    # 兼容 AI 可能传来的其他参数名
     if command is None:
         command = kwargs.get("cmd") or kwargs.get("shell_command") or kwargs.get("shell") or ""
     if not command:
@@ -54,8 +95,7 @@ def execute_local_command(command=None, **kwargs):
         result = subprocess.run(
             command, shell=True, text=True, capture_output=True, timeout=30
         )
-        output = f"【标准输出】:\n{result.stdout}\n【标准错误】:\n{result.stderr}"
-        # 截断过长输出
+        output = f"【退出码】: {result.returncode}\n【标准输出】:\n{result.stdout}\n【标准错误】:\n{result.stderr}"
         if len(output) > TOOL_OUTPUT_MAX_CHARS:
             output = output[:TOOL_OUTPUT_MAX_CHARS] + f"\n...[输出过长，已截断至 {TOOL_OUTPUT_MAX_CHARS} 字符]"
         return output
@@ -146,11 +186,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "write_phone_file",
-            "description": "在手机 Termux home 目录写入或创建文件",
+            "description": "在手机 Termux home 目录写入或创建文件，支持子目录（自动创建）",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "保存的文件名，例如 summary.txt"},
+                    "filename": {"type": "string", "description": "保存的文件名，例如 summary.txt 或 notes/todo.txt"},
                     "content": {"type": "string", "description": "写入文件的具体内容"}
                 },
                 "required": ["filename", "content"]
@@ -215,7 +255,7 @@ tools_schema = [
 ]
 
 
-# ==== 3. 辅助函数 ====
+# ==== 4. LLM 请求 ====
 
 def make_headers():
     return {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
@@ -224,18 +264,14 @@ def make_headers():
 def safe_get_choice(data):
     """安全获取 choices[0].message，返回 dict 或空 dict。"""
     choices = data.get("choices")
-    if not choices or not isinstance(choices, list) or len(choices) == 0:
+    if not choices or not isinstance(choices, list):
         return {}
     return choices[0].get("message") or {}
 
 
 def call_llm_sync(messages, tools=None):
     """非流式请求，返回解析后的 dict。"""
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "stream": False,  # 明确禁用流式，防止上游默认开启
-    }
+    payload = {"model": MODEL_NAME, "messages": messages, "stream": False}
     if tools:
         payload["tools"] = tools
     try:
@@ -252,20 +288,13 @@ def call_llm_sync(messages, tools=None):
 
 def call_llm_stream(messages, tools=None):
     """流式请求，返回 requests.Response 对象（未读取 body）。"""
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "stream": True,
-    }
+    payload = {"model": MODEL_NAME, "messages": messages, "stream": True}
     if tools:
         payload["tools"] = tools
     try:
         resp = requests.post(
             API_URL, json=payload, headers=make_headers(),
-            stream=True,
-            # timeout=(连接超时, 读取每个chunk的超时)
-            # 连接阶段 30s，chunk 间隔最长等 300s（长回复也够用）
-            timeout=(30, 300)
+            stream=True, timeout=(30, 300)
         )
         resp.raise_for_status()
         return resp
@@ -277,11 +306,12 @@ def call_llm_stream(messages, tools=None):
         raise RuntimeError(f"网络请求失败: {str(e)}")
 
 
+# ==== 5. 工具执行 ====
+
 def execute_all_tool_calls(tool_calls):
     """执行所有 tool_calls，返回 tool 消息列表。"""
     results = []
     for tool_call in tool_calls:
-        # 安全提取字段
         func_info = tool_call.get("function", {})
         func_name = func_info.get("name", "")
         tool_call_id = tool_call.get("id", "unknown")
@@ -305,10 +335,9 @@ def execute_all_tool_calls(tool_calls):
         else:
             result = f"错误: 未知工具 {func_name}"
 
-        # 截断过长的工具输出
         result_str = str(result)
         if len(result_str) > TOOL_OUTPUT_MAX_CHARS:
-            result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + f"\n...[已截断]"
+            result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + "\n...[已截断]"
 
         results.append({
             "role": "tool",
@@ -319,134 +348,72 @@ def execute_all_tool_calls(tool_calls):
     return results
 
 
-def build_tool_context_note(tool_calls, tool_results):
-    """
-    把工具调用过程拼成一段隐藏备注，附加到最终回复末尾。
-    Chatbox 会把这段内容存入历史，下次对话时 LLM 能看到曾经执行过什么。
-    """
-    lines = ["\n\n---\n*[工具执行记录]*"]
-    for tc, tr in zip(tool_calls, tool_results):
-        func_info = tc.get("function", {})
-        name = func_info.get("name", "unknown")
-        try:
-            args = json.loads(func_info.get("arguments", "{}"))
-        except Exception:
-            args = {}
-        result_content = tr.get("content", "")
-        # 只保留前 500 字符作为摘要，避免历史膨胀
-        summary = result_content[:500] + ("..." if len(result_content) > 500 else "")
-        lines.append(f"- 调用 `{name}({args})` → {summary}")
-    return "\n".join(lines)
+# ==== 6. SSE 工具函数 ====
+
+def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None):
+    """构造一个标准 SSE data chunk 的字节串。"""
+    delta = {}
+    if role:
+        delta["role"] = role
+    if content is not None:
+        delta["content"] = content
+    chunk = {
+        "id": resp_id,
+        "object": "chat.completion.chunk",
+        "model": MODEL_NAME,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
-def inject_tool_note_into_response(response_data, note):
-    """把工具备注注入到非流式响应的 content 末尾。"""
+def stream_proxy(upstream_resp):
+    """逐行解析上游 SSE，安全透传，捕获传输中断。"""
     try:
-        msg = response_data["choices"][0]["message"]
-        original = msg.get("content") or ""
-        msg["content"] = original + note
-    except (KeyError, IndexError):
-        pass
-    return response_data
-
-
-def stream_proxy_with_note(upstream_resp, note):
-    """透传流式响应，在 [DONE] 前插入一个携带工具备注的额外 chunk。"""
-    try:
-        for chunk in upstream_resp.iter_content(chunk_size=None):
-            if not chunk:
-                continue
-            chunk_str = chunk.decode("utf-8", errors="replace")
-            # 拦截 [DONE]，在它之前插入备注 chunk
-            if "data: [DONE]" in chunk_str:
-                note_chunk = {
-                    "object": "chat.completion.chunk",
-                    "model": MODEL_NAME,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": note},
-                        "finish_reason": None,
-                    }]
-                }
-                yield f"data: {json.dumps(note_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-                yield chunk  # 原始 [DONE]
-            else:
-                yield chunk
+        # 按行迭代比 iter_content 更可靠，每行是一个完整的 SSE 事件
+        for line in upstream_resp.iter_lines(decode_unicode=True):
+            if line:
+                yield (line + "\n\n").encode("utf-8")
+        yield b"data: [DONE]\n\n"
     except Exception as e:
-        err = f"[流式传输中断: {str(e)}]"
-        error_chunk = {
-            "choices": [{"delta": {"content": err}, "finish_reason": "stop", "index": 0}]
-        }
-        yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
         yield b"data: [DONE]\n\n"
     finally:
         upstream_resp.close()
 
 
+def wrap_as_stream(data):
+    """把非流式响应 dict 包装成 SSE，不重复请求。"""
+    choices = data.get("choices", [])
+    resp_id = data.get("id", "")
+    content = (choices[0].get("message", {}).get("content") or "") if choices else ""
+    finish_reason = (choices[0].get("finish_reason") or "stop") if choices else "stop"
+
+    yield _make_sse_chunk(content=content, resp_id=resp_id, role="assistant")
+    yield _make_sse_chunk(finish_reason=finish_reason, resp_id=resp_id)
+    yield b"data: [DONE]\n\n"
+
+
 def make_error_stream(message):
     """把错误信息包装成合法的 SSE chunk 序列。"""
-    import time
     err_id = f"err-{int(time.time())}"
-    chunk = {
-        "id": err_id,
-        "object": "chat.completion.chunk",
-        "model": MODEL_NAME,
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": f"[错误] {message}"},
-            "finish_reason": None,
-        }]
-    }
-    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    end_chunk = {
-        "id": err_id,
-        "object": "chat.completion.chunk",
-        "model": MODEL_NAME,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-    }
-    yield f"data: {json.dumps(end_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    yield _make_sse_chunk(content=f"[错误] {message}", resp_id=err_id, role="assistant")
+    yield _make_sse_chunk(finish_reason="stop", resp_id=err_id)
     yield b"data: [DONE]\n\n"
 
 
-def wrap_as_stream(data):
-    """把非流式响应 dict 包装成合法的 SSE chunk 序列，不重复请求。"""
-    resp_id = data.get("id", "")
-    choices = data.get("choices", [])
-    content = choices[0].get("message", {}).get("content", "") if choices else ""
-    finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
-
-    # content 可能为 None（某些模型在 tool_calls 时不返回 content）
-    if content is None:
-        content = ""
-
-    chunk = {
-        "id": resp_id,
-        "object": "chat.completion.chunk",
-        "model": MODEL_NAME,
-        "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": None}]
-    }
-    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-
-    end_chunk = {
-        "id": resp_id,
-        "object": "chat.completion.chunk",
-        "model": MODEL_NAME,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
-    }
-    yield f"data: {json.dumps(end_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    yield b"data: [DONE]\n\n"
-
-
-# ==== 4. 路由 ====
+# ==== 7. 路由 ====
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
     chatbox_data = request.json or {}
-    user_messages = chatbox_data.get("messages", [])
     want_stream = chatbox_data.get("stream", False)
 
-    # 过滤掉 Chatbox 可能已经注入的 system message，避免重复
-    user_messages = [m for m in user_messages if m.get("role") != "system"]
+    # Chatbox 用 conversation_id 标识会话，没有则退化为无记忆模式
+    conv_id = chatbox_data.get("conversation_id") or chatbox_data.get("id") or ""
+
+    # 从请求中提取最新一条 user 消息
+    incoming = [m for m in chatbox_data.get("messages", []) if m.get("role") != "system"]
+    latest_user_msg = next((m for m in reversed(incoming) if m["role"] == "user"), None)
 
     system_prompt = {
         "role": "system",
@@ -457,9 +424,15 @@ def chat_completions():
             f"普通对话直接回复即可，不要无谓地调用工具。"
         )
     }
-    messages = [system_prompt] + user_messages
 
-    # 第一轮必须非流式，才能完整拿到 tool_calls
+    # 用服务端历史重建完整 messages（包含历史 tool_calls 和 tool results）
+    server_history = _get_session(conv_id) if conv_id else []
+    if latest_user_msg and (not server_history or server_history[-1] != latest_user_msg):
+        server_history.append(latest_user_msg)
+
+    messages = [system_prompt] + server_history
+
+    # 第一轮非流式，拿完整 tool_calls
     try:
         first_data = call_llm_sync(messages, tools=tools_schema)
     except RuntimeError as e:
@@ -471,23 +444,54 @@ def chat_completions():
 
     # ---- 有工具调用 ----
     if choice.get("tool_calls"):
+        # 把 assistant 的 tool_calls 消息存入历史
         messages.append(choice)
         tool_results = execute_all_tool_calls(choice["tool_calls"])
         messages.extend(tool_results)
 
-        # 构建工具执行备注，附加到最终回复，让 Chatbox 历史里保留工具上下文
-        tool_note = build_tool_context_note(choice["tool_calls"], tool_results)
-
         try:
             if want_stream:
+                # 第二轮流式，工具结果已在 messages 里
                 stream_resp = call_llm_stream(messages)
-                return Response(
-                    stream_proxy_with_note(stream_resp, tool_note),
-                    content_type='text/event-stream; charset=utf-8'
-                )
+
+                def _stream_and_save():
+                    """透传流式，同时收集 assistant 回复内容用于存历史。"""
+                    collected = []
+                    try:
+                        for line in stream_resp.iter_lines(decode_unicode=True):
+                            if not line:
+                                continue
+                            yield (line + "\n\n").encode("utf-8")
+                            # 收集 delta content 用于存历史
+                            if line.startswith("data:") and "[DONE]" not in line:
+                                try:
+                                    chunk_data = json.loads(line[5:].strip())
+                                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                                    if delta.get("content"):
+                                        collected.append(delta["content"])
+                                except Exception:
+                                    pass
+                        yield b"data: [DONE]\n\n"
+                    except Exception as e:
+                        yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
+                        yield b"data: [DONE]\n\n"
+                    finally:
+                        stream_resp.close()
+                        # 把完整的 assistant 回复存入 session 历史
+                        if conv_id:
+                            final_content = "".join(collected)
+                            final_messages = messages + [{"role": "assistant", "content": final_content}]
+                            _save_session(conv_id, final_messages)
+
+                return Response(_stream_and_save(), content_type='text/event-stream; charset=utf-8')
+
             else:
                 second_data = call_llm_sync(messages)
-                second_data = inject_tool_note_into_response(second_data, tool_note)
+                # 存历史
+                if conv_id:
+                    assistant_msg = safe_get_choice(second_data)
+                    final_messages = messages + [assistant_msg] if assistant_msg else messages
+                    _save_session(conv_id, final_messages)
                 return Response(
                     json.dumps(second_data, ensure_ascii=False),
                     content_type='application/json; charset=utf-8'
@@ -498,8 +502,12 @@ def chat_completions():
             return jsonify({"error": str(e)}), 502
 
     # ---- 无工具调用 ----
+    # 存历史
+    if conv_id:
+        final_messages = messages + [choice] if choice else messages
+        _save_session(conv_id, final_messages)
+
     if want_stream:
-        # 第一轮已有结果，直接包装成 SSE，不重复请求
         return Response(wrap_as_stream(first_data), content_type='text/event-stream; charset=utf-8')
 
     return Response(
@@ -508,6 +516,20 @@ def chat_completions():
     )
 
 
+@app.route('/v1/sessions', methods=['DELETE'])
+def clear_sessions():
+    """清空所有 session 历史，调试用。"""
+    with _sessions_lock:
+        _sessions.clear()
+    return jsonify({"status": "ok", "message": "所有 session 已清空"})
+
+
+@app.route('/v1/sessions/<conv_id>', methods=['DELETE'])
+def clear_session(conv_id):
+    """清空指定 session 历史。"""
+    _clear_session(conv_id)
+    return jsonify({"status": "ok", "message": f"session {conv_id} 已清空"})
+
+
 if __name__ == '__main__':
-    # threaded=True 让每个请求在独立线程处理，避免工具执行阻塞后续请求
     app.run(host='127.0.0.1', port=5846, debug=False, threaded=True)
