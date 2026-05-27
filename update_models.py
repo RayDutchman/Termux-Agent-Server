@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-update_models.py - Termux Agent Server Model Configuration Manager
+update_models.py - AIPhoneTools Model Configuration Manager
 
 Usage:
   python update_models.py              # Enter interactive menu
@@ -429,7 +429,7 @@ def cmd_set_default():
 
 def interactive_menu():
     """Main interactive menu (entered when no command-line args)."""
-    print("\n=== Termux Agent Server - Model Manager ===")
+    print("\n=== AIPhoneTools - Model Manager ===")
     print(f"Config file: {CONFIG_PATH}")
 
     actions = [

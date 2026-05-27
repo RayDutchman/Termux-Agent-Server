@@ -1191,7 +1191,7 @@ if __name__ == '__main__':
 
             print()
             print("=" * 55)
-            print("  Termux Agent Server — Startup Config")
+            print("  AIPhoneTools — Startup Config")
             print("=" * 55)
             _print_providers(cfg)
             print()

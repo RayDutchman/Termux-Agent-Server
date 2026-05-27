@@ -1,4 +1,4 @@
-# Termux Agent Server
+# AIPhoneTools
 
 一个运行在 Android 手机 Termux 环境中的 AI Agent 服务器，让 AI 能够操作你的手机——读写文件、执行命令、调用 Termux-API。
 
@@ -35,8 +35,8 @@ termux-setup-storage
 
 # 克隆项目
 cd ~
-git clone https://github.com/RayDutchman/Termux-Agent-Server.git
-cd Termux-Agent-Server
+git clone https://github.com/RayDutchman/AIPhoneTools.git
+cd AIPhoneTools
 
 # 安装 Python 依赖
 pip install -r requirements.txt
@@ -172,7 +172,7 @@ echo "# 我的记忆\n\n- 我喜欢用 Python\n- 我的项目在 ~/projects" > ~
 
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
-cd ~/Termux-Agent-Server
+cd ~/AIPhoneTools
 nohup python server.py > ~/server.log 2>&1 &
 echo "Server started. Log: tail -f ~/server.log"
 ```
@@ -268,7 +268,7 @@ TOOL_OUTPUT_MAX_CHARS = 8000            # 工具输出限制
 ## 📁 项目结构
 
 ```
-Termux-Agent-Server/
+AIPhoneTools/
 ├── server.py              # 主服务器
 ├── update_models.py              # 模型管理工具
 ├── models_config.json            # API 配置（不提交）
@@ -314,4 +314,4 @@ MIT License
 
 - [Termux 官网](https://termux.dev/)
 - [Chatbox 官网](https://chatboxai.app/)
-- [项目 GitHub](https://github.com/RayDutchman/Termux-Agent-Server)
+- [项目 GitHub](https://github.com/RayDutchman/AIPhoneTools)

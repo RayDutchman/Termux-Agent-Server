@@ -1,4 +1,4 @@
-# Termux Agent Server
+# AIPhoneTools
 
 An AI Agent server running in Android Termux environment, enabling AI to control your phone — read/write files, execute commands, and call Termux-API.
 
@@ -33,8 +33,8 @@ pkg install python git -y
 termux-setup-storage
 
 # Clone repository
-git clone https://github.com/RayDutchman/Termux-Agent-Server.git
-cd Termux-Agent-Server
+git clone https://github.com/RayDutchman/AIPhoneTools.git
+cd AIPhoneTools
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -170,7 +170,7 @@ Create `~/start_server.sh`:
 
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
-cd ~/Termux-Agent-Server
+cd ~/AIPhoneTools
 nohup python server.py > ~/server.log 2>&1 &
 echo "Server started. Log: tail -f ~/server.log"
 ```
@@ -265,7 +265,7 @@ TOOL_OUTPUT_MAX_CHARS = 8000            # Tool output limit
 ## Project Structure
 
 ```
-Termux-Agent-Server/
+AIPhoneTools/
 ├── server.py              # Main server
 ├── update_models.py              # Model management tool
 ├── models_config.json            # API config (not committed)
@@ -310,5 +310,5 @@ MIT License
 
 - [Termux Official](https://termux.dev/)
 - [Chatbox Official](https://chatboxai.app/)
-- [Project GitHub](https://github.com/RayDutchman/Termux-Agent-Server)
+- [Project GitHub](https://github.com/RayDutchman/AIPhoneTools)
 - [中文文档](README.zh-CN.md)
