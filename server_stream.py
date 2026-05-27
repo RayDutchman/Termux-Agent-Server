@@ -73,6 +73,7 @@ def get_provider_for_model(model_id: str):
     3. If multiple providers exist, use the default provider and pass
        model_id as-is (still transparent — don't swap the model ID).
     """
+    model_id = model_id.strip()  # 防御性去除首尾空格
     for provider in MODELS_CONFIG.get("providers", {}).values():
         for model in provider.get("models", []):
             if model["id"] == model_id:
@@ -449,23 +450,25 @@ def execute_all_tool_calls(tool_calls):
         func_name = func_info.get("name", "")
         tool_call_id = tool_call.get("id", "unknown")
 
-        raw_arguments = func_info.get("arguments", "{}")
-        log.info(f"[TOOL_EXEC] {func_name}, raw_arguments={raw_arguments[:200]}")
+        raw_arguments = func_info.get("arguments", "")
+        log.info(f"[TOOL_EXEC] {func_name} args={raw_arguments[:200]}")
 
         # Fix malformed upstream API response: strip leading '{}'
         if raw_arguments.startswith("{}"):
             raw_arguments = raw_arguments[2:]
-            log.info(f"[TOOL_EXEC] Stripped leading {{}} from arguments: {raw_arguments[:200]}")
+            log.info(f"[TOOL_EXEC] Stripped leading {{}} from arguments")
 
-        try:
-            func_args = json.loads(raw_arguments)
-            if not isinstance(func_args, dict):
-                func_args = {}
-        except json.JSONDecodeError as e:
-            log.warning(f"[TOOL_EXEC] JSON parse failed: {e}")
+        # 空参数直接用 {}，不走 JSON 解析（避免无意义的 WARNING）
+        if not raw_arguments.strip():
             func_args = {}
-
-        log.info(f"[TOOL_EXEC] {func_name}, parsed_args={func_args}")
+        else:
+            try:
+                func_args = json.loads(raw_arguments)
+                if not isinstance(func_args, dict):
+                    func_args = {}
+            except json.JSONDecodeError as e:
+                log.warning(f"[TOOL_EXEC] JSON parse failed: {e}, raw={raw_arguments[:100]!r}")
+                func_args = {}
 
         if not func_name:
             result = "Error: empty tool name"
@@ -626,15 +629,10 @@ def chat_completions():
         choice = safe_get_choice(first_data)
 
         if choice.get("tool_calls"):
-            log.info(f"[TOOL] {len(choice['tool_calls'])} tool call(s) detected:")
-            for i, tc in enumerate(choice["tool_calls"]):
-                func_name = tc.get("function", {}).get("name", "")
-                func_args_raw = tc.get("function", {}).get("arguments", "")
-                log.info(f"  [{i+1}] {func_name}")
-                log.info(f"      raw_args: {repr(func_args_raw[:150])}")
-
+            tool_calls_list = choice["tool_calls"]
+            log.info(f"[TOOL] {len(tool_calls_list)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls_list]}")
             messages.append(choice)
-            tool_results = execute_all_tool_calls(choice["tool_calls"])
+            tool_results = execute_all_tool_calls(tool_calls_list)
             messages.extend(tool_results)
 
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
@@ -750,21 +748,7 @@ def chat_completions():
             return
 
         # Tool calls detected: execute tools and stream second round
-        log.info(f"[TOOL] {len(tool_calls)} tool call(s) detected:")
-        for i, tc in enumerate(tool_calls):
-            func_name = tc.get("function", {}).get("name", "")
-            func_args_raw = tc.get("function", {}).get("arguments", "")
-            log.info(f"  [{i+1}] {func_name}")
-            log.info(f"      raw_args: {repr(func_args_raw[:150])}")
-
-        # 用新的 resp_id 开启第二段消息，让 Chatbox 把工具执行结果当成独立回复
-        tool_resp_id = f"chatcmpl-tool-{int(time.time())}"
-        tool_created = int(time.time())
-        yield _make_sse_chunk(
-            content="Running tools...\n\n",
-            resp_id=tool_resp_id, created=tool_created,
-            role="assistant", model_id=model_id
-        )
+        log.info(f"[TOOL] {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}")
 
         assistant_msg = {
             "role": "assistant",
@@ -774,7 +758,7 @@ def chat_completions():
         messages.append(assistant_msg)
         tool_results = execute_all_tool_calls(tool_calls)
         messages.extend(tool_results)
-        
+
         log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
         log.info("[stream] Sending second round stream request")
 
@@ -784,23 +768,36 @@ def chat_completions():
             yield from make_error_stream(str(e))
             return
 
+        # 第二轮：续在同一个 resp_id 下，只转发纯文本 content，
+        # 过滤掉任何 tool_calls 字段，Chatbox 感知不到工具调用的存在。
         collected = []
         buf2 = b""
         try:
             for chunk in second_resp.iter_content(chunk_size=4096):
                 if not chunk:
                     continue
-                yield chunk
                 buf2 += chunk
                 while b"\n" in buf2:
                     line_bytes, buf2 = buf2.split(b"\n", 1)
                     line = line_bytes.decode("utf-8", errors="replace").strip()
-                    if line.startswith("data:") and "[DONE]" not in line:
+                    if not line:
+                        continue
+                    if line == "data: [DONE]":
+                        continue
+                    if line.startswith("data:"):
                         try:
                             d = json.loads(line[5:].strip())
                             delta = d.get("choices", [{}])[0].get("delta", {})
-                            if delta.get("content"):
-                                collected.append(delta["content"])
+                            finish = d.get("choices", [{}])[0].get("finish_reason")
+                            text = delta.get("content")
+                            if text:
+                                collected.append(text)
+                                # 用原始 resp_id 转发，让 Chatbox 视为同一条消息的续流
+                                yield _make_sse_chunk(
+                                    content=text,
+                                    resp_id=resp_id, created=resp_created,
+                                    model_id=model_id
+                                )
                         except Exception:
                             pass
         except Exception as e:
@@ -810,6 +807,10 @@ def chat_completions():
             second_resp.close()
             if conv_id:
                 _save_session(conv_id, messages + [{"role": "assistant", "content": "".join(collected)}])
+
+        # 第二轮结束，发送最终 stop
+        yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
+        yield b"data: [DONE]\n\n"
 
     return Response(_generate(), content_type='text/event-stream; charset=utf-8')
 
