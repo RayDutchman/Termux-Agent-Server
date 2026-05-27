@@ -18,13 +18,13 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ==== 1. 基础配置 ====
+# ==== 1. Basic Configuration ====
 
 DOWNLOAD_DIR = os.path.expanduser("~")
 
-# 工具输出最大字符数，超出截断
+# Max chars for tool output, truncate if exceeded
 TOOL_OUTPUT_MAX_CHARS = 8000
-# session 历史最多保留的轮数（一轮 = 一条 user + 一条 assistant）
+# Max turns to keep in session history (one turn = one user + one assistant message)
 SESSION_MAX_TURNS = 20
 
 # ==== 1b. Multi-model config loading ====
@@ -57,7 +57,7 @@ def _load_models_config() -> dict:
         return _FALLBACK_CONFIG
 
 
-# 启动时加载一次；update_models.py 修改配置后需重启服务
+# Load once at startup; restart service after update_models.py modifies config
 MODELS_CONFIG: dict = _load_models_config()
 
 
@@ -73,7 +73,7 @@ def get_provider_for_model(model_id: str):
     3. If multiple providers exist, use the default provider and pass
        model_id as-is (still transparent — don't swap the model ID).
     """
-    model_id = model_id.strip()  # 防御性去除首尾空格
+    model_id = model_id.strip()  # Defensively strip leading/trailing spaces
     for provider in MODELS_CONFIG.get("providers", {}).values():
         for model in provider.get("models", []):
             if model["id"] == model_id:
@@ -103,9 +103,9 @@ def get_default_model_id() -> str:
     return MODELS_CONFIG.get("default_model", "claude-sonnet-4-6")
 
 
-# ==== 2. Session 历史管理 ====
-# 用 conversation_id（Chatbox 每个会话唯一）作为 key
-# 存储完整的 messages 列表，包含 tool_calls 和 tool results
+# ==== 2. Session History Management ====
+# Use conversation_id (unique per Chatbox conversation) as key
+# Store complete messages list, including tool_calls and tool results
 _sessions: dict = {}
 _sessions_lock = threading.Lock()
 
@@ -163,26 +163,26 @@ def _clear_session(conv_id: str):
 
 
 
-# ==== 3. 工具函数 ====
+# ==== 3. Tool Functions ====
 
 def read_phone_file(filename):
     path = os.path.join(DOWNLOAD_DIR, filename)
     try:
         size = os.path.getsize(path)
         if size > 500 * 1024:
-            return f"错误: 文件 {filename} 过大 ({size // 1024}KB)，请指定更小的文件"
-        # 优先 UTF-8，失败后降级 latin-1（保证不抛异常）
+            return f"Error: File {filename} too large ({size // 1024}KB), please specify a smaller file"
+        # Try UTF-8 first, fallback to latin-1 (guaranteed not to throw)
         for enc in ("utf-8", "gbk", "latin-1"):
             try:
                 with open(path, "r", encoding=enc) as f:
                     return f.read()
             except UnicodeDecodeError:
                 continue
-        return f"错误: 无法以任何已知编码读取文件 {filename}"
+        return f"Error: Cannot read file {filename} with any known encoding"
     except FileNotFoundError:
-        return f"错误: 文件不存在: {filename}"
+        return f"Error: File not found: {filename}"
     except Exception as e:
-        return f"错误: 无法读取文件 {filename}。原因: {str(e)}"
+        return f"Error: Cannot read file {filename}. Reason: {str(e)}"
 
 
 def write_phone_file(filename, content):
@@ -191,42 +191,42 @@ def write_phone_file(filename, content):
         os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"成功: 已保存至 {path}"
+        return f"Success: Saved to {path}"
     except Exception as e:
-        return f"错误: 无法写入文件。原因: {str(e)}"
+        return f"Error: Cannot write file. Reason: {str(e)}"
 
 
 def execute_local_command(command=None, **kwargs):
     if command is None:
         command = kwargs.get("cmd") or kwargs.get("shell_command") or kwargs.get("shell") or ""
     if not command:
-        return "错误: 未提供命令"
+        return "Error: No command provided"
     try:
         result = subprocess.run(
             command, shell=True, text=True, capture_output=True, timeout=30
         )
-        output = f"【退出码】: {result.returncode}\n【标准输出】:\n{result.stdout}\n【标准错误】:\n{result.stderr}"
+        output = f"[Exit Code]: {result.returncode}\n[Stdout]:\n{result.stdout}\n[Stderr]:\n{result.stderr}"
         if len(output) > TOOL_OUTPUT_MAX_CHARS:
-            output = output[:TOOL_OUTPUT_MAX_CHARS] + f"\n...[输出过长，已截断至 {TOOL_OUTPUT_MAX_CHARS} 字符]"
+            output = output[:TOOL_OUTPUT_MAX_CHARS] + f"\n...[Output too long, truncated to {TOOL_OUTPUT_MAX_CHARS} chars]"
         return output
     except subprocess.TimeoutExpired:
-        return "错误: 命令执行超时（30秒）"
+        return "Error: Command execution timeout (30s)"
     except Exception as e:
-        return f"错误: 命令执行失败。原因: {str(e)}"
+        return f"Error: Command execution failed. Reason: {str(e)}"
 
 
 def list_phone_dir(sub_dir=""):
     target_dir = os.path.join(DOWNLOAD_DIR, sub_dir) if sub_dir else DOWNLOAD_DIR
     try:
         if not os.path.exists(target_dir):
-            return f"错误: 目录不存在: {target_dir}"
+            return f"Error: Directory not found: {target_dir}"
         items = os.listdir(target_dir)
         return json.dumps(
             {"directory": target_dir, "contents": items, "count": len(items)},
             ensure_ascii=False, indent=2
         )
     except Exception as e:
-        return f"错误: 无法列出目录。原因: {str(e)}"
+        return f"Error: Cannot list directory. Reason: {str(e)}"
 
 
 def search_phone_files(query_pattern):
@@ -239,7 +239,7 @@ def search_phone_files(query_pattern):
             ensure_ascii=False, indent=2
         )
     except Exception as e:
-        return f"错误: 搜索失败。原因: {str(e)}"
+        return f"Error: Search failed. Reason: {str(e)}"
 
 
 def get_phone_system_status():
@@ -261,11 +261,11 @@ def get_phone_system_status():
             except json.JSONDecodeError:
                 status["battery"] = battery_result.stdout.strip()
         else:
-            status["battery"] = "Termux-API 未安装或无法获取电量信息"
+            status["battery"] = "Termux-API not installed or cannot get battery info"
 
         return json.dumps(status, ensure_ascii=False, indent=2)
     except Exception as e:
-        return f"错误: 获取系统状态失败。原因: {str(e)}"
+        return f"Error: Failed to get system status. Reason: {str(e)}"
 
 
 tools_map = {
@@ -282,11 +282,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "read_phone_file",
-            "description": "读取手机 Termux home 目录下的文本、CSV 或代码文件",
+            "description": "Read text, CSV or code files from Termux home directory",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "文件名，例如 data.csv 或子目录/文件名"}
+                    "filename": {"type": "string", "description": "Filename, e.g. data.csv or subdir/filename"}
                 },
                 "required": ["filename"]
             }
@@ -296,12 +296,12 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "write_phone_file",
-            "description": "在手机 Termux home 目录写入或创建文件，支持子目录（自动创建）",
+            "description": "Write or create file in Termux home directory, supports subdirectories (auto-created)",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "保存的文件名，例如 summary.txt 或 notes/todo.txt"},
-                    "content": {"type": "string", "description": "写入文件的具体内容"}
+                    "filename": {"type": "string", "description": "Filename to save, e.g. summary.txt or notes/todo.txt"},
+                    "content": {"type": "string", "description": "Content to write to file"}
                 },
                 "required": ["filename", "content"]
             }
@@ -311,11 +311,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "execute_local_command",
-            "description": "在手机 Termux 环境内执行 shell 命令，如运行脚本、pip 安装、查看目录等",
+            "description": "Execute shell command in Termux environment, e.g. run scripts, pip install, view directories",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "要执行的 shell 命令，例如 ls ~、python script.py"}
+                    "command": {"type": "string", "description": "Shell command to execute, e.g. ls ~, python script.py"}
                 },
                 "required": ["command"]
             }
@@ -325,13 +325,13 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "list_phone_dir",
-            "description": "列出 Termux home 目录或其子目录的文件和文件夹",
+            "description": "List files and folders in Termux home directory or subdirectories",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sub_dir": {
                         "type": "string",
-                        "description": "子目录名，例如 'projects'。留空则列出 home 根目录"
+                        "description": "Subdirectory name, e.g. 'projects'. Leave empty to list home root"
                     }
                 }
             }
@@ -341,13 +341,13 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "search_phone_files",
-            "description": "在 Termux home 目录中按通配符搜索文件",
+            "description": "Search files by wildcard pattern in Termux home directory",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query_pattern": {
                         "type": "string",
-                        "description": "搜索模式，例如 '*.py'、'*.pdf'、'*invoice*'"
+                        "description": "Search pattern, e.g. '*.py', '*.pdf', '*invoice*'"
                     }
                 },
                 "required": ["query_pattern"]
@@ -358,21 +358,21 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "get_phone_system_status",
-            "description": "获取手机当前存储空间、内存使用情况和电量状态",
+            "description": "Get current phone storage, memory usage and battery status",
             "parameters": {"type": "object", "properties": {}}
         }
     }
 ]
 
 
-# ==== 4. LLM 请求 ====
+# ==== 4. LLM Requests ====
 
 def make_headers(api_key: str) -> dict:
     return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
 
 def safe_get_choice(data):
-    """安全获取 choices[0].message，返回 dict 或空 dict。"""
+    """Safely get choices[0].message, return dict or empty dict."""
     choices = data.get("choices")
     if not choices or not isinstance(choices, list):
         return {}
@@ -381,15 +381,15 @@ def safe_get_choice(data):
 
 def call_llm_sync(messages, tools=None, model_id: str = None):
     """
-    非流式请求，返回解析后的 dict。
-    model_id 为空时使用默认模型。
+    Non-streaming request, return parsed dict.
+    Use default model when model_id is empty.
     """
     model_id = model_id or get_default_model_id()
     provider, model = get_provider_for_model(model_id)
 
     api_url = f"{provider['api_base']}/v1/chat/completions"
     payload = {"model": model_id, "messages": messages, "stream": False}
-    # 只有模型声明支持工具时才带 tools 字段
+    # Only include tools field when model declares tool support
     if tools and model.get("supports_tools", True):
         payload["tools"] = tools
 
@@ -415,8 +415,8 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
 
 def call_llm_stream(messages, tools=None, model_id: str = None):
     """
-    流式请求，返回 requests.Response 对象（未读取 body）。
-    model_id 为空时使用默认模型。
+    Streaming request, return requests.Response object (body not read).
+    Use default model when model_id is empty.
     """
     model_id = model_id or get_default_model_id()
     provider, model = get_provider_for_model(model_id)
@@ -443,7 +443,7 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
         raise RuntimeError(f"Network request failed: {str(e)}")
 
 
-# ==== 5. 工具执行 ====
+# ==== 5. Tool Execution ====
 
 def execute_all_tool_calls(tool_calls):
     """Execute all tool_calls and return a list of tool result messages."""
@@ -461,7 +461,7 @@ def execute_all_tool_calls(tool_calls):
             raw_arguments = raw_arguments[2:]
             log.info(f"[TOOL_EXEC] Stripped leading {{}} from arguments")
 
-        # 空参数直接用 {}，不走 JSON 解析（避免无意义的 WARNING）
+        # Empty args use {} directly, skip JSON parsing (avoid meaningless WARNING)
         if not raw_arguments.strip():
             func_args = {}
         else:
@@ -498,13 +498,13 @@ def execute_all_tool_calls(tool_calls):
     return results
 
 
-# ==== 6. SSE 工具函数 ====
+# ==== 6. SSE Helper Functions ====
 
 def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, created=None, model_id=None):
     """
-    构造一个符合 OpenAI 规范的 SSE data chunk 字节串。
-    规范要求必填字段：id, object, created, model, choices
-    choices[] 必填：index, delta, finish_reason（可为 null）
+    Construct an OpenAI-compliant SSE data chunk byte string.
+    Spec requires: id, object, created, model, choices
+    choices[] requires: index, delta, finish_reason (can be null)
     """
     delta = {}
     if role:
@@ -529,17 +529,17 @@ def make_error_stream(message):
     yield b"data: [DONE]\n\n"
 
 
-# ==== 7. 路由 ====
+# ==== 7. Routes ====
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
     chatbox_data = request.json or {}
     want_stream = chatbox_data.get("stream", False)
 
-    # 提取 model_id，未指定时使用默认模型
+    # Extract model_id, use default if not specified
     model_id = (chatbox_data.get("model") or get_default_model_id()).strip()
 
-    # 增强 conv_id 提取逻辑（尝试多种字段名）
+    # Enhanced conv_id extraction (try multiple field names)
     conv_id = (
         chatbox_data.get("conversation_id") or 
         chatbox_data.get("id") or 
@@ -548,12 +548,12 @@ def chat_completions():
         ""
     )
 
-    # 提取 Chatbox 发来的 system 消息（如果有）
+    # Extract system message from Chatbox (if any)
     chatbox_system_msgs = [m for m in chatbox_data.get("messages", []) if m.get("role") == "system"]
     incoming = [m for m in chatbox_data.get("messages", []) if m.get("role") != "system"]
     latest_user_msg = next((m for m in reversed(incoming) if m["role"] == "user"), None)
     
-    # 如果 conv_id 还是空，用 user 消息的 hash 作为 fallback
+    # If conv_id still empty, use hash of user message as fallback
     if not conv_id and incoming:
         import hashlib
         first_user = next((m for m in incoming if m.get("role") == "user"), None)
@@ -567,10 +567,10 @@ def chat_completions():
         user_content = latest_user_msg.get("content", "")[:50]
         log.info(f"[REQUEST] latest_user_msg: {user_content}...")
 
-    # 构建 system prompt：基础说明 + memory.md + Chatbox 的 system 消息
+    # Build system prompt: base instructions + memory.md + Chatbox system message
     system_parts = []
     
-    # 1. 基础 system prompt
+    # 1. Base system prompt
     system_parts.append(
         f"You are a versatile AI assistant running inside Termux on an Android phone. "
         f"Your working directory is {DOWNLOAD_DIR}. "
@@ -593,19 +593,19 @@ def chat_completions():
         f"See 'termux-api --help' for full list."
     )
     
-    # 2. 自动加载 memory.md（如果存在）
+    # 2. Auto-load memory.md (if exists)
     memory_path = os.path.join(DOWNLOAD_DIR, "memory.md")
     if os.path.exists(memory_path):
         try:
             with open(memory_path, "r", encoding="utf-8") as f:
-                memory_content = f.read(2000)  # 限制 2000 字符
+                memory_content = f.read(2000)  # Limit to 2000 chars
             if memory_content.strip():
                 system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
                 log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md")
         except Exception as e:
             log.warning(f"[MEMORY] Failed to load memory.md: {e}")
     
-    # 3. 合并 Chatbox 发来的 system 消息（如果有）
+    # 3. Merge system message from Chatbox (if any)
     if chatbox_system_msgs:
         for msg in chatbox_system_msgs:
             content = msg.get("content", "").strip()
@@ -639,7 +639,7 @@ def chat_completions():
 
     messages = [system_prompt] + server_history
 
-    # ---- 非流式模式：多轮工具调用循环 ----
+    # ---- Non-streaming mode: multi-round tool calling loop ----
     if not want_stream:
         MAX_TOOL_ROUNDS = 20
         try:
@@ -673,9 +673,9 @@ def chat_completions():
             content_type='application/json; charset=utf-8'
         )
 
-    # ---- 流式模式：边收边发，立刻响应 Chatbox ----
+    # ---- Streaming mode: receive and forward immediately, respond to Chatbox instantly ----
     def _generate():
-        request_start_time = time.time()  # 整个请求的起始时间
+        request_start_time = time.time()  # Start time of entire request
         try:
             first_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
@@ -708,13 +708,13 @@ def chat_completions():
                         choice0 = data.get("choices", [{}])[0]
                         delta = choice0.get("delta", {})
 
-                        # 收集 tool_calls（不转发）
+                        # Collect tool_calls (do not forward)
                         for tc in delta.get("tool_calls", []):
                             if not has_tool_calls:
-                                # 第一次检测到 tool_calls：立刻补发 finish_reason:stop，
-                                # 让 Chatbox 认为第一段回复已正常结束，不再等待也不超时重试。
-                                # 如果前面没有任何文字内容，补一个空格占位，
-                                # 避免 Chatbox 收到空消息。
+                                # First tool_calls detected: immediately send finish_reason:stop,
+                                # Make Chatbox think first reply ended normally, no more waiting or timeout retry.
+                                # If no text content before, add a space placeholder,
+                                # Avoid Chatbox receiving empty message.
                                 if not content_parts:
                                     yield _make_sse_chunk(
                                         content=" ", resp_id=resp_id,
@@ -739,7 +739,7 @@ def chat_completions():
                             if tc.get("function", {}).get("name"):
                                 tc_map[idx]["function"]["name"] = tc["function"]["name"]
 
-                        # 只转发纯文本 content
+                        # Only forward plain text content
                         if delta.get("content") and not has_tool_calls:
                             content_parts.append(delta["content"])
                             yield (line + "\n\n").encode("utf-8")
@@ -764,23 +764,23 @@ def chat_completions():
             yield b"data: [DONE]\n\n"
             return
 
-        # ---- 多轮工具调用循环 ----
-        # 每轮：执行工具 → 发工具名提示 → 请求下一轮 → 实时流式转发文字
-        # 直到 AI 不再调工具，循环结束。
-        MAX_TOOL_ROUNDS = 20  # 防止死循环
-        # 接近 Chatbox 总时长上限时强制中断工具调用，让 AI 直接生成总结
-        # Chatbox 默认总超时约 60-90 秒；留 15 秒余量给最后一轮总结生成
+        # ---- Multi-round tool calling loop ----
+        # Each round: execute tools → send tool name hint → request next round → forward text in real-time
+        # Loop until AI stops calling tools.
+        MAX_TOOL_ROUNDS = 20  # Prevent infinite loop
+        # Force interrupt tool calling when approaching Chatbox total timeout, let AI generate summary directly
+        # Chatbox default total timeout ~60-90s; leave 15s margin for final summary generation
         BUDGET_SECONDS = 50
         tool_round = 0
-        last_round_text = ""  # 最后一轮收到的纯文本（用于 session 保存）
-        budget_exceeded = False  # 标记是否因时间预算被中断
+        last_round_text = ""  # Plain text received in last round (for session save)
+        budget_exceeded = False  # Flag whether interrupted by time budget
 
         while tool_calls and tool_round < MAX_TOOL_ROUNDS:
             elapsed = time.time() - request_start_time
-            # 如果剩余时间不足以再做一轮工具调用 + 总结生成，强制中断
+            # If remaining time insufficient for another tool round + summary, force interrupt
             if elapsed > BUDGET_SECONDS:
                 log.warning(f"[BUDGET] Elapsed {elapsed:.1f}s exceeds budget {BUDGET_SECONDS}s, forcing summary")
-                # 通知用户工具调用被时间预算中断
+                # Notify user that tool calling was interrupted by time budget
                 budget_resp_id = f"chatcmpl-budget-{int(time.time())}"
                 budget_created = int(time.time())
                 yield _make_sse_chunk(
@@ -791,10 +791,10 @@ def chat_completions():
                 yield _make_sse_chunk(finish_reason="stop", resp_id=budget_resp_id, created=budget_created, model_id=model_id)
                 yield b"data: [DONE]\n\n"
 
-                # 把待执行的 tool_calls 作为已被打断的标记附加（不真正执行）
-                # 然后让 AI 用一个 system 消息引导，立刻生成总结
-                # 注意：要保证 messages 历史合法（assistant tool_calls 必须配对 tool result）
-                # 所以这里给每个未执行的 tool_call 补一个空的 tool result
+                # Append pending tool_calls as interrupted marker (not actually executed)
+                # Then guide AI with a system message to generate summary immediately
+                # Note: ensure messages history is valid (assistant tool_calls must pair with tool result)
+                # So add an empty tool result for each unexecuted tool_call
                 placeholder_results = [
                     {
                         "role": "tool",
@@ -815,24 +815,24 @@ def chat_completions():
                     "content": "Time budget exhausted. Stop calling tools NOW. Summarize the results gathered so far and reply directly to the user in plain text."
                 })
                 tool_calls = None
-                # 让循环外的代码再发一次请求生成总结
-                # 用一个标志，跳出循环后处理
+                # Let code outside loop send another request to generate summary
+                # Use a flag, handle after breaking loop
                 budget_exceeded = True
                 break
 
             tool_round += 1
             log.info(f"[TOOL] Round {tool_round}, {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}, elapsed={elapsed:.1f}s")
 
-            # 把本轮 assistant 消息（含 tool_calls）追加到 messages
+            # Append this round assistant message (with tool_calls) to messages
             messages.append({
                 "role": "assistant",
                 "content": content or None,
                 "tool_calls": tool_calls
             })
 
-            # 向 Chatbox 推送工具调用提示（独立消息气泡，按调用顺序列出所有工具名）
+            # Push tool calling hint to Chatbox (separate message bubble, list all tool names in call order)
             tool_names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
-            # 同名连续合并：cmd, cmd, cmd, list -> cmd ×3, list；每个工具单独一行
+            # Merge consecutive same names: cmd, cmd, cmd, list -> cmd ×3, list; each tool on separate line
             display_parts = []
             i = 0
             while i < len(tool_names):
@@ -852,16 +852,16 @@ def chat_completions():
                 role="assistant", model_id=model_id
             )
 
-            # 执行所有工具
+            # Execute all tools
             tool_results = execute_all_tool_calls(tool_calls)
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
-            # 结束工具执行提示消息
+            # End tool execution hint message
             yield _make_sse_chunk(finish_reason="stop", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
             yield b"data: [DONE]\n\n"
 
-            # 发起下一轮请求（带工具定义，AI 可能继续调工具）
+            # Send next round request (with tool definitions, AI may continue calling tools)
             log.info(f"[stream] Sending round {tool_round + 1} request, messages={len(messages)}")
             try:
                 next_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
@@ -869,7 +869,7 @@ def chat_completions():
                 yield from make_error_stream(str(e))
                 return
 
-            # 收集下一轮的文字和 tool_calls；文字实时转发给 Chatbox
+            # Collect next round text and tool_calls; forward text to Chatbox in real-time
             next_content_parts = []
             next_tc_map = {}
             next_has_tool_calls = False
@@ -896,10 +896,10 @@ def chat_completions():
                             choice0 = d.get("choices", [{}])[0]
                             delta = choice0.get("delta", {})
 
-                            # 收集 tool_calls（不转发；遇到第一个 tool_call 就结束当前文字消息）
+                            # Collect tool_calls (do not forward; end current text message on first tool_call)
                             for tc in delta.get("tool_calls", []):
                                 if not next_has_tool_calls:
-                                    # 如果已经流式发出过文字，先结束这条消息
+                                    # If text already streamed, end this message first
                                     if next_content_parts:
                                         yield _make_sse_chunk(
                                             finish_reason="stop",
@@ -923,7 +923,7 @@ def chat_completions():
                                 if tc.get("function", {}).get("name"):
                                     next_tc_map[idx]["function"]["name"] = tc["function"]["name"]
 
-                            # 文字内容：实时转发（仅在尚未触发 tool_calls 时）
+                            # Text content: forward in real-time (only when tool_calls not yet triggered)
                             if delta.get("content") and not next_has_tool_calls:
                                 next_content_parts.append(delta["content"])
                                 yield _make_sse_chunk(
@@ -948,14 +948,14 @@ def chat_completions():
             resp_created = next_created
             last_round_text = content
 
-        # 循环结束
+        # Loop ended
         if tool_round >= MAX_TOOL_ROUNDS and tool_calls:
             log.warning(f"[TOOL] Reached max tool rounds ({MAX_TOOL_ROUNDS}), stopping")
-            yield _make_sse_chunk(content="\n\n[工具调用轮次已达上限，停止执行]",
+            yield _make_sse_chunk(content="\n\n[Max tool rounds reached, stopping execution]",
                                   resp_id=resp_id, created=resp_created,
                                   model_id=model_id)
 
-        # 时间预算耗尽：发起最后一次不带 tools 的请求，让 AI 生成总结
+        # Time budget exhausted: send final request without tools to generate summary
         if budget_exceeded:
             log.info("[BUDGET] Sending summary-only request (no tools)")
             summary_resp_id = f"chatcmpl-summary-{int(time.time())}"
@@ -1018,7 +1018,7 @@ def chat_completions():
 
 @app.route('/v1/models', methods=['GET'])
 def list_models():
-    """OpenAI 兼容的模型列表端点，返回 models_config.json 中所有模型。"""
+    """OpenAI-compatible model list endpoint, returns all models from models_config.json."""
     models = []
     for provider in MODELS_CONFIG.get("providers", {}).values():
         for model in provider.get("models", []):
@@ -1028,7 +1028,7 @@ def list_models():
                 "created": 1700000000,
                 "owned_by": provider.get("name", "termux-agent")
             })
-    # 如果配置为空，至少返回默认模型
+    # If config is empty, return at least the default model
     if not models:
         models.append({
             "id": get_default_model_id(),
@@ -1108,7 +1108,7 @@ if __name__ == '__main__':
             data = resp.json()
             models = []
             for m in data.get("data", []):
-                mid = m.get("id", "").strip()  # 防御性去除上游返回的首尾空格
+                mid = m.get("id", "").strip()  # Defensively strip leading/trailing spaces from upstream response
                 if mid:
                     models.append({
                         "id": mid,

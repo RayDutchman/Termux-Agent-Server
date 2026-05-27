@@ -1,55 +1,53 @@
 # Termux Agent Server
 
-一个运行在 Android 手机 Termux 环境中的 AI Agent 服务器，让 AI 能够操作你的手机——读写文件、执行命令、调用 Termux-API。
+An AI Agent server running in Android Termux environment, enabling AI to control your phone — read/write files, execute commands, and call Termux-API.
 
-## ✨ 核心特性
+## Features
 
-- 🤖 **多模型支持** - 动态加载模型列表，Chatbox 可自由切换
-- 🔧 **本地工具执行** - 6 种工具：文件读写、命令执行、目录查看、文件搜索、系统状态
-- 📱 **Termux-API 集成** - 支持 GPS、剪贴板、通知、TTS、相机等 40+ 功能
-- 💾 **长期记忆** - 自动加载 `~/memory.md`，支持 Chatbox 的 AI 记忆功能
-- 🔄 **多轮工具调用** - 最多 20 轮，每轮最多 5 个工具，自动分批执行
-- ⏱️ **时间预算机制** - 50 秒自动中断，防止客户端 timeout
-- 🌊 **流式输出** - 实时响应，工具执行进度可见
-- 🔌 **OpenAI 兼容** - 标准 API 接口，兼容任何 OpenAI 客户端
+- 🤖 **Multi-Model Support** - Dynamically load model lists, switch freely in Chatbox
+- 🔧 **Local Tool Execution** - 6 tools: file read/write, command execution, directory listing, file search, system status
+- 📱 **Termux-API Integration** - Support 40+ features: GPS, clipboard, notifications, TTS, camera, etc.
+- 💾 **Long-Term Memory** - Auto-load `~/memory.md`, compatible with Chatbox AI memory
+- 🔄 **Multi-Round Tool Calling** - Up to 20 rounds, max 5 tools per round, auto-batched execution
+- ⏱️ **Time Budget Mechanism** - 50s auto-interrupt to prevent client timeout
+- 🔌 **OpenAI Compatible** - Standard API interface, works with any OpenAI client
 
-## 🚀 快速开始
+## Quick Start
 
-### 1. 安装 Termux
+### 1. Install Termux
 
-从 [F-Droid](https://f-droid.org/packages/com.termux/) 或 [GitHub Releases](https://github.com/termux/termux-app/releases) 下载（不要用 Google Play 版本）。
+Download from [F-Droid](https://f-droid.org/packages/com.termux/) or [GitHub Releases](https://github.com/termux/termux-app/releases) (don't use Google Play version).
 
-### 2. 安装依赖
+### 2. Install Dependencies
 
 ```bash
-# 更新软件包
+# Update packages
 pkg update && pkg upgrade -y
 
-# 安装 Python 和 Git
+# Install Python and Git
 pkg install python git -y
 
-# 授予存储权限
+# Grant storage permission
 termux-setup-storage
 
-# 克隆项目
-cd ~
+# Clone repository
 git clone https://github.com/RayDutchman/Termux-Agent-Server.git
 cd Termux-Agent-Server
 
-# 安装 Python 依赖
+# Install Python dependencies
 pip install -r requirements.txt
 ```
 
-### 3. 配置 API
+### 3. Configure API
 
-复制示例配置并填入你的 API Key：
+Copy example config and fill in your API Key:
 
 ```bash
 cp models_config.example.json models_config.json
-nano models_config.json  # 或用其他编辑器
+nano models_config.json  # or use other editor
 ```
 
-配置示例：
+**Config Example:**
 
 ```json
 {
@@ -73,98 +71,98 @@ nano models_config.json  # 或用其他编辑器
 }
 ```
 
-### 4. 启动服务
+### 4. Start Server
 
 ```bash
-# 前台运行（测试用）
+# Foreground (for testing)
 python server_stream.py
 
-# 后台运行（推荐）
+# Background (production)
 nohup python server_stream.py > ~/server.log 2>&1 &
 
-# 查看日志
+# View logs
 tail -f ~/server.log
 ```
 
-### 5. 配置 Chatbox
+### 5. Configure Chatbox
 
-1. 下载 [Chatbox](https://chatboxai.app/)
-2. 设置 → AI 提供商 → 添加自定义 API
-3. 配置：
-   - **API 地址**：`http://手机IP:5846`（用 `hostname -I` 查看 IP）
-   - **API Key**：任意值
-   - **模型**：从列表选择
+1. Download [Chatbox](https://chatboxai.app/)
+2. Settings → AI Provider → Add Custom API
+3. Configure:
+   - **API URL**: `http://phone-ip:5846` (use `hostname -I` to check IP)
+   - **API Key**: any value
 
-## 📚 可用工具
+## Available Tools
 
-| 工具 | 功能 | 示例 |
-|------|------|------|
-| `read_phone_file` | 读取文件 | "读取 memory.md" |
-| `write_phone_file` | 写入文件 | "创建 notes.txt，内容是..." |
-| `execute_local_command` | 执行命令 | "执行 ls -la" |
-| `list_phone_dir` | 列出目录 | "列出当前目录" |
-| `search_phone_files` | 搜索文件 | "搜索所有 .py 文件" |
-| `get_phone_system_status` | 系统状态 | "获取电量和内存" |
+| Tool | Function | Example |
+|------|----------|---------|
+| `read_phone_file` | Read file | "Read memory.md" |
+| `write_phone_file` | Write file | "Create notes.txt with content..." |
+| `execute_local_command` | Execute command | "Run ls -la" |
+| `list_phone_dir` | List directory | "List current directory" |
+| `search_phone_files` | Search files | "Search all .py files" |
+| `get_phone_system_status` | System status | "Get battery and memory" |
 
-### Termux-API 支持
+### Termux-API Support
 
-通过 `execute_local_command` 调用 40+ Termux-API 命令：
+Call 40+ Termux-API commands via `execute_local_command`:
 
 ```bash
-# 安装 Termux-API（需要同时安装 App 和包）
+# Install Termux-API (requires both App and package)
 pkg install termux-api -y
 ```
 
-常用命令：
-- `termux-location` - GPS 定位
-- `termux-clipboard-get/set` - 剪贴板
-- `termux-notification` - 通知
-- `termux-tts-speak` - 语音合成
-- `termux-camera-photo` - 拍照
-- `termux-sms-list/send` - 短信
-- `termux-toast` - Toast 提示
-- `termux-vibrate` - 震动
-- `termux-torch` - 手电筒
-- `termux-wifi-connectioninfo` - WiFi 信息
+**Common Commands:**
 
-完整列表：`termux-api --help`
+- `termux-location` - GPS location
+- `termux-clipboard-get/set` - Clipboard
+- `termux-notification` - Notifications
+- `termux-tts-speak` - Text-to-speech
+- `termux-camera-photo` - Take photo
+- `termux-sms-list/send` - SMS
+- `termux-toast` - Toast message
+- `termux-vibrate` - Vibrate
+- `termux-torch` - Flashlight
+- `termux-wifi-connectioninfo` - WiFi info
 
-## 🔧 模型管理
+Full list: `termux-api --help`
 
-使用 `update_models.py` 管理多个 Provider 和模型：
+## Model Management
+
+Use `update_models.py` to manage multiple Providers and models:
 
 ```bash
-# 交互菜单
+# Interactive menu
 python update_models.py
 
-# 快捷命令
-python update_models.py list          # 列出所有模型
-python update_models.py add-provider  # 添加 Provider
-python update_models.py add-model     # 添加模型
-python update_models.py test          # 测试连接
-python update_models.py set-default   # 设置默认模型
+# Command-line usage
+python update_models.py list          # List all models
+python update_models.py add-provider  # Add Provider
+python update_models.py add-model     # Add model
+python update_models.py test          # Test connection
+python update_models.py set-default   # Set default model
 ```
 
-修改配置后重启服务：
+## Advanced Usage
+
+### Restart Server
 
 ```bash
 pkill -f server_stream.py
 nohup python server_stream.py > ~/server.log 2>&1 &
 ```
 
-## 💡 高级功能
+### Long-Term Memory
 
-### 长期记忆
-
-创建 `~/memory.md`，AI 每次对话都会自动读取：
+Create `~/memory.md`, AI will auto-load it in every conversation:
 
 ```bash
-echo "# 我的记忆\n\n- 我喜欢用 Python\n- 我的项目在 ~/projects" > ~/memory.md
+echo "# My Memory\n\n- I prefer Python\n- My projects are in ~/projects" > ~/memory.md
 ```
 
-### 自动启动脚本
+### Auto-Start Script
 
-创建 `~/start_server.sh`：
+Create `~/start_server.sh`:
 
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
@@ -178,137 +176,136 @@ chmod +x ~/start_server.sh
 ~/start_server.sh
 ```
 
-### SSH 远程管理
+### SSH Remote Management
 
 ```bash
-# 安装并启动 SSH
+# Install and start SSH
 pkg install openssh -y
-passwd  # 设置密码
-sshd    # 启动服务
+sshd
 
-# 从电脑连接（默认端口 8022）
-ssh -p 8022 u0_aXXX@手机IP
+# Connect from PC (default port 8022)
+ssh -p 8022 u0_aXXX@phone-ip
 ```
 
-## 🐛 故障排查
+## Troubleshooting
 
-### Chatbox 连接失败
+### Chatbox Connection Failed
 
 ```bash
-# 确认服务运行
+# Check if server is running
 ps aux | grep server_stream.py
 
-# 确认 IP 地址
+# Confirm IP address
 hostname -I
 
-# 测试连接
+# Test locally
 curl http://localhost:5846/v1/models
 ```
 
-### 工具不执行
+### Tool Execution Failed
 
-查看日志中的 `[TOOL]` 信息：
+Check `[TOOL]` info in logs:
 
 ```bash
 tail -50 ~/server.log | grep TOOL
 ```
 
-### AI 失忆
+### AI Memory Loss
 
-确认日志中 `conv_id` 不为空：
+Check session management:
 
 ```bash
 tail -50 ~/server.log | grep conv_id
 ```
 
-### 查看实时日志
+### View Logs
 
 ```bash
-# 所有日志
+# All logs
 tail -f ~/server.log
 
-# 只看工具调用
+# Tool execution only
 tail -f ~/server.log | grep TOOL
 
-# 只看错误
+# Errors and warnings only
 tail -f ~/server.log | grep -E "ERROR|WARNING"
 ```
 
-## 📡 API 端点
+## API Endpoints
 
 ### POST /v1/chat/completions
 
-OpenAI 兼容的聊天接口。
+OpenAI-compatible chat interface.
 
 ### GET /v1/models
 
-获取可用模型列表。
+List all available models.
 
 ### DELETE /v1/sessions
 
-清空所有会话历史（调试用）。
+Clear all session history.
 
 ### DELETE /v1/sessions/{conv_id}
 
-清空指定会话历史。
+Clear specific session.
 
-## ⚙️ 配置选项
+## Configuration
 
-在 `server_stream.py` 顶部：
+In `server_stream.py` header:
 
 ```python
-DOWNLOAD_DIR = os.path.expanduser("~")  # 工作目录
-TOOL_OUTPUT_MAX_CHARS = 8000            # 工具输出限制
-SESSION_MAX_TURNS = 20                  # 会话历史轮数
+DOWNLOAD_DIR = os.path.expanduser("~")  # Working directory
+TOOL_OUTPUT_MAX_CHARS = 8000            # Tool output limit
+SESSION_MAX_TURNS = 20                  # Session history turns
 ```
 
-## 📁 项目结构
+## Project Structure
 
 ```
 Termux-Agent-Server/
-├── server_stream.py              # 主服务器
-├── update_models.py              # 模型管理工具
-├── models_config.json            # API 配置（不提交）
-├── models_config.example.json    # 配置模板
-├── requirements.txt              # Python 依赖
-├── .gitignore                    # Git 忽略规则
-└── README.md                     # 本文档
+├── server_stream.py              # Main server
+├── update_models.py              # Model management tool
+├── models_config.json            # API config (not committed)
+├── models_config.example.json    # Config template
+├── requirements.txt              # Python dependencies
+├── .gitignore                    # Git ignore rules
+├── README.md                     # This document (English)
+└── README.zh-CN.md               # Chinese documentation
 ```
 
-## ⚠️ 注意事项
+## Notes
 
-- **网络**：手机和电脑必须在同一局域网
-- **电量**：长时间运行建议连接充电器
-- **后台**：在系统设置中允许 Termux 后台运行
-- **安全**：不要将 `models_config.json` 提交到公开仓库
+- **Battery**: Enable "Run in background" for Termux in system settings
+- **Security**: Don't commit `models_config.json` to public repositories
 
-## 🔄 更新日志
+## Changelog
 
 ### v2.0.0 (2026-05-28)
 
-- ✅ 多模型支持 + 动态模型列表
-- ✅ 多轮工具调用循环（最多 20 轮）
-- ✅ 时间预算机制（50 秒自动中断）
-- ✅ 自动加载 memory.md
-- ✅ 保留 Chatbox system 消息
-- ✅ Termux-API 命令集成
-- ✅ 工具调用进度显示
-- ✅ Session 按 turn 裁剪
-- ✅ 日志精简 + 代码清理
+**Features:**
+- ✅ Multi-round tool calling loop (max 20 rounds)
+- ✅ Time budget mechanism (50s auto-interrupt)
+- ✅ Auto-load memory.md
+- ✅ Preserve Chatbox system messages
+- ✅ Termux-API command integration
+
+**Improvements:**
+- ✅ Session trimming by turn boundaries
 
 ### v1.0.0 (2026-05-26)
 
-- ✅ 流式和非流式支持
-- ✅ 6 种本地工具
-- ✅ Session 历史管理
-- ✅ OpenAI 兼容接口
+**Initial Release:**
+- ✅ 6 local tools
+- ✅ Session history management
+- ✅ OpenAI-compatible interface
 
-## 📄 许可证
+## License
 
 MIT License
 
-## 🔗 相关链接
+## Links
 
-- [Termux 官网](https://termux.dev/)
-- [Chatbox 官网](https://chatboxai.app/)
-- [项目 GitHub](https://github.com/RayDutchman/Termux-Agent-Server)
+- [Termux Official](https://termux.dev/)
+- [Chatbox Official](https://chatboxai.app/)
+- [Project GitHub](https://github.com/RayDutchman/Termux-Agent-Server)
+- [中文文档](README.zh-CN.md)
