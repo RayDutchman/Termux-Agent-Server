@@ -965,8 +965,8 @@ if __name__ == '__main__':
         print("  No valid provider found. Please configure one now.")
         print("  -----------------------------------------------")
         while True:
-            pid   = input("  Provider ID   (short tag, e.g. lmuai / openai): ").strip() or "default"
-            name  = input(f"  Display name  (human label, e.g. 'LMU AI') [{pid}]: ").strip() or pid
+            pid   = input("  Provider ID   (short tag, e.g. openai / anthropic / deepseek): ").strip() or "default"
+            name  = input(f"  Display name  (e.g. OpenAI / Anthropic / DeepSeek) [{pid}]: ").strip() or pid
             url   = input("  API Base URL  (e.g. https://api.openai.com): ").strip().rstrip("/")
             key   = input("  API Key: ").strip()
             if not url or not key:
