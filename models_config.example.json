@@ -1,0 +1,25 @@
+{
+  "providers": {
+    "lmuai": {
+      "name": "LMU AI",
+      "api_base": "https://api.lmuai.com",
+      "api_key": "YOUR_API_KEY_HERE",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "supports_tools": true,
+          "max_tokens": 8192
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "supports_tools": true,
+          "max_tokens": 8192
+        }
+      ]
+    }
+  },
+  "default_provider": "lmuai",
+  "default_model": "claude-sonnet-4-6"
+}

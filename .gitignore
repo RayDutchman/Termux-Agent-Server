@@ -1,0 +1,13 @@
+# 含真实 API Key 的配置文件，不提交到 Git
+models_config.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 日志文件
+*.log
+
+# 环境变量
+.env

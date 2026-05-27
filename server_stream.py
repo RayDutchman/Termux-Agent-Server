@@ -19,10 +19,6 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ==== 1. 基础配置 ====
-API_KEY = "sk-9b7a62c8cee0aa73203584c7f2d39d1e0adb507dd7c90b8f34f9bbf073a966f7"
-API_BASE = "https://api.lmuai.com"
-API_URL = f"{API_BASE}/v1/chat/completions"
-MODEL_NAME = "claude-sonnet-4-6"
 
 DOWNLOAD_DIR = os.path.expanduser("~")
 
@@ -30,6 +26,77 @@ DOWNLOAD_DIR = os.path.expanduser("~")
 TOOL_OUTPUT_MAX_CHARS = 8000
 # session 历史最多保留的轮数（一轮 = 一条 user + 一条 assistant）
 SESSION_MAX_TURNS = 20
+
+# ==== 1b. 多模型配置加载 ====
+# 优先读取 models_config.json，不存在时回退到硬编码默认值
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
+
+# 硬编码兜底配置（models_config.json 不存在时使用）
+_FALLBACK_CONFIG = {
+    "providers": {
+        "lmuai": {
+            "name": "LMU AI",
+            "api_base": "https://api.lmuai.com",
+            "api_key": "",
+            "models": [
+                {
+                    "id": "claude-sonnet-4-6",
+                    "name": "Claude Sonnet 4.6",
+                    "supports_tools": True,
+                    "max_tokens": 8192
+                }
+            ]
+        }
+    },
+    "default_provider": "lmuai",
+    "default_model": "claude-sonnet-4-6"
+}
+
+
+def _load_models_config() -> dict:
+    """加载 models_config.json，失败时返回兜底配置。"""
+    try:
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        log.info(f"[CONFIG] 已加载 models_config.json，providers={list(cfg.get('providers', {}).keys())}")
+        return cfg
+    except FileNotFoundError:
+        log.warning(f"[CONFIG] models_config.json 不存在，使用兜底配置")
+        return _FALLBACK_CONFIG
+    except Exception as e:
+        log.error(f"[CONFIG] 加载 models_config.json 失败: {e}，使用兜底配置")
+        return _FALLBACK_CONFIG
+
+
+# 启动时加载一次；update_models.py 修改配置后需重启服务
+MODELS_CONFIG: dict = _load_models_config()
+
+
+def get_provider_for_model(model_id: str):
+    """
+    根据 model_id 查找对应的 provider 配置和 model 配置。
+    返回 (provider_dict, model_dict)，找不到时返回 (default_provider, default_model)。
+    """
+    for provider in MODELS_CONFIG.get("providers", {}).values():
+        for model in provider.get("models", []):
+            if model["id"] == model_id:
+                return provider, model
+
+    # 找不到时使用默认 provider + 默认 model
+    default_provider_id = MODELS_CONFIG.get("default_provider", "")
+    default_model_id = MODELS_CONFIG.get("default_model", "")
+    default_provider = MODELS_CONFIG.get("providers", {}).get(default_provider_id, {})
+    default_model = next(
+        (m for m in default_provider.get("models", []) if m["id"] == default_model_id),
+        {"id": default_model_id, "supports_tools": True, "max_tokens": 8192}
+    )
+    log.warning(f"[CONFIG] 模型 {model_id!r} 未找到，回退到默认: {default_model_id!r}")
+    return default_provider, default_model
+
+
+def get_default_model_id() -> str:
+    return MODELS_CONFIG.get("default_model", "claude-sonnet-4-6")
 
 
 # ==== 2. Session 历史管理 ====
@@ -41,7 +108,29 @@ _sessions_lock = threading.Lock()
 
 def _get_session(conv_id: str) -> list:
     with _sessions_lock:
-        return list(_sessions.get(conv_id, []))
+        history = list(_sessions.get(conv_id, []))
+
+    # 清理末尾孤立的 tool_calls：
+    # 如果 session 末尾有 assistant 消息带 tool_calls，但后面没有对应的 tool result，
+    # 说明上次工具执行被中断（Chatbox 拦截或网络错误），直接截掉这段残缺历史，
+    # 避免 AI 下次看到未完成的 tool_calls 而无限重试。
+    cleaned = list(history)
+    while cleaned:
+        last = cleaned[-1]
+        if last.get("role") == "assistant" and last.get("tool_calls"):
+            # 末尾是带 tool_calls 的 assistant 消息，属于孤立状态
+            log.warning(f"[SESSION] 检测到末尾孤立 tool_calls，清理 conv_id={conv_id!r}")
+            cleaned.pop()
+        elif last.get("role") == "tool":
+            # tool result 后面应该跟着 assistant 回复，如果没有也清理
+            cleaned.pop()
+        else:
+            break
+    if len(cleaned) != len(history):
+        log.warning(f"[SESSION] 清理了 {len(history) - len(cleaned)} 条孤立消息")
+        with _sessions_lock:
+            _sessions[conv_id] = cleaned
+    return cleaned
 
 
 def _save_session(conv_id: str, messages: list):
@@ -63,6 +152,7 @@ def _save_session(conv_id: str, messages: list):
 def _clear_session(conv_id: str):
     with _sessions_lock:
         _sessions.pop(conv_id, None)
+
 
 
 # ==== 3. 工具函数 ====
@@ -269,8 +359,8 @@ tools_schema = [
 
 # ==== 4. LLM 请求 ====
 
-def make_headers():
-    return {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+def make_headers(api_key: str) -> dict:
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
 
 def safe_get_choice(data):
@@ -281,14 +371,23 @@ def safe_get_choice(data):
     return choices[0].get("message") or {}
 
 
-def call_llm_sync(messages, tools=None):
-    """非流式请求，返回解析后的 dict。"""
-    payload = {"model": MODEL_NAME, "messages": messages, "stream": False}
-    if tools:
+def call_llm_sync(messages, tools=None, model_id: str = None):
+    """
+    非流式请求，返回解析后的 dict。
+    model_id 为空时使用默认模型。
+    """
+    model_id = model_id or get_default_model_id()
+    provider, model = get_provider_for_model(model_id)
+
+    api_url = f"{provider['api_base']}/v1/chat/completions"
+    payload = {"model": model_id, "messages": messages, "stream": False}
+    # 只有模型声明支持工具时才带 tools 字段
+    if tools and model.get("supports_tools", True):
         payload["tools"] = tools
+
     t0 = time.time()
-    log.info(f"[sync] 发送请求，消息数={len(messages)}, 带工具={tools is not None}")
-    # === 添加详细的消息日志（仅最后3条） ===
+    log.info(f"[sync] model={model_id!r}, provider={provider.get('name')}, 消息数={len(messages)}, 带工具={tools is not None}")
+    # 打印最后 3 条消息摘要
     if len(messages) > 1:
         for i, msg in enumerate(messages[-3:]):
             role = msg.get("role", "")
@@ -296,7 +395,11 @@ def call_llm_sync(messages, tools=None):
             has_tool_calls = "tool_calls" in msg
             log.info(f"  msg[{len(messages)-3+i}]: role={role}, has_tool_calls={has_tool_calls}, content={content_preview}...")
     try:
-        resp = requests.post(API_URL, json=payload, headers=make_headers(), timeout=120)
+        resp = requests.post(
+            api_url, json=payload,
+            headers=make_headers(provider["api_key"]),
+            timeout=120
+        )
         resp.raise_for_status()
         result = json.loads(resp.content.decode("utf-8"))
         log.info(f"[sync] 完成，耗时={time.time()-t0:.1f}s")
@@ -309,15 +412,24 @@ def call_llm_sync(messages, tools=None):
         raise RuntimeError(f"请求或解析失败: {str(e)}")
 
 
-def call_llm_stream(messages, tools=None):
-    """流式请求，返回 requests.Response 对象（未读取 body）。"""
-    payload = {"model": MODEL_NAME, "messages": messages, "stream": True}
-    if tools:
+def call_llm_stream(messages, tools=None, model_id: str = None):
+    """
+    流式请求，返回 requests.Response 对象（未读取 body）。
+    model_id 为空时使用默认模型。
+    """
+    model_id = model_id or get_default_model_id()
+    provider, model = get_provider_for_model(model_id)
+
+    api_url = f"{provider['api_base']}/v1/chat/completions"
+    payload = {"model": model_id, "messages": messages, "stream": True}
+    if tools and model.get("supports_tools", True):
         payload["tools"] = tools
-    log.info(f"[stream] 发送请求，消息数={len(messages)}")
+
+    log.info(f"[stream] model={model_id!r}, provider={provider.get('name')}, 消息数={len(messages)}")
     try:
         resp = requests.post(
-            API_URL, json=payload, headers=make_headers(),
+            api_url, json=payload,
+            headers=make_headers(provider["api_key"]),
             stream=True, timeout=(30, 300)
         )
         resp.raise_for_status()
@@ -386,7 +498,7 @@ def execute_all_tool_calls(tool_calls):
 
 # ==== 6. SSE 工具函数 ====
 
-def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, created=None):
+def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, created=None, model_id=None):
     """
     构造一个符合 OpenAI 规范的 SSE data chunk 字节串。
     规范要求必填字段：id, object, created, model, choices
@@ -401,7 +513,7 @@ def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, cre
         "id": resp_id or f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
         "created": created or int(time.time()),
-        "model": MODEL_NAME,
+        "model": model_id or get_default_model_id(),
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
     }
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -454,6 +566,9 @@ def chat_completions():
     chatbox_data = request.json or {}
     want_stream = chatbox_data.get("stream", False)
 
+    # 提取 model_id，未指定时使用默认模型
+    model_id = chatbox_data.get("model") or get_default_model_id()
+
     # 增强 conv_id 提取逻辑（尝试多种字段名）
     conv_id = (
         chatbox_data.get("conversation_id") or 
@@ -475,8 +590,7 @@ def chat_completions():
                 str(first_user.get("content", ""))[:100].encode()
             ).hexdigest()[:8]
     
-    # === 添加请求日志 ===
-    log.info(f"[REQUEST] conv_id={conv_id!r}, stream={want_stream}, incoming_msgs={len(incoming)}")
+    log.info(f"[REQUEST] conv_id={conv_id!r}, model={model_id!r}, stream={want_stream}, incoming_msgs={len(incoming)}")
     if latest_user_msg:
         user_content = latest_user_msg.get("content", "")[:50]
         log.info(f"[REQUEST] latest_user_msg: {user_content}...")
@@ -492,25 +606,37 @@ def chat_completions():
     }
 
     server_history = _get_session(conv_id) if conv_id else []
-    if latest_user_msg and (not server_history or server_history[-1] != latest_user_msg):
-        server_history.append(latest_user_msg)
 
-    # === 添加 session 日志 ===
+    # 追加最新 user 消息前，检查最近几条历史里是否已经有完全相同的内容，
+    # 避免用户重发同一条消息时在 session 里重复堆积。
+    if latest_user_msg:
+        latest_content = latest_user_msg.get("content", "")
+        # 检查最近 6 条消息里有没有相同内容的 user 消息
+        recent = server_history[-6:] if len(server_history) >= 6 else server_history
+        already_in_history = any(
+            m.get("role") == "user" and m.get("content", "") == latest_content
+            for m in recent
+        )
+        if not already_in_history:
+            server_history.append(latest_user_msg)
+            log.info(f"[SESSION] 追加新 user 消息")
+        else:
+            log.info(f"[SESSION] user 消息已在近期历史中，跳过追加（防重复）")
+
     log.info(f"[SESSION] history_length={len(server_history)}")
 
     messages = [system_prompt] + server_history
 
-    # ---- 非流式模式（逻辑不变）----
+    # ---- 非流式模式 ----
     if not want_stream:
         try:
-            first_data = call_llm_sync(messages, tools=tools_schema)
+            first_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
             return jsonify({"error": str(e)}), 502
 
         choice = safe_get_choice(first_data)
 
         if choice.get("tool_calls"):
-            # === 添加详细工具调用日志 ===
             log.info(f"[TOOL] 检测到 {len(choice['tool_calls'])} 个工具调用:")
             for i, tc in enumerate(choice["tool_calls"]):
                 func_name = tc.get("function", {}).get("name", "")
@@ -522,11 +648,10 @@ def chat_completions():
             tool_results = execute_all_tool_calls(choice["tool_calls"])
             messages.extend(tool_results)
             
-            # === 添加执行结果日志 ===
             log.info(f"[TOOL] 执行完毕，结果长度: {[len(r['content']) for r in tool_results]}")
             log.info(f"[tool] 发起第二轮请求")
             try:
-                second_data = call_llm_sync(messages)
+                second_data = call_llm_sync(messages, model_id=model_id)
                 if conv_id:
                     _save_session(conv_id, messages + [safe_get_choice(second_data)])
                 return Response(
@@ -546,14 +671,11 @@ def chat_completions():
     # ---- 流式模式：边收边发，立刻响应 Chatbox ----
     def _generate():
         try:
-            first_resp = call_llm_stream(messages, tools=tools_schema)
+            first_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
             yield from make_error_stream(str(e))
             return
 
-        # 边解析边选择性转发：
-        # - 纯文本 content chunk → 立刻转发给 Chatbox
-        # - tool_calls chunk → 静默丢弃，不发给 Chatbox（避免 Chatbox 自己的工具系统拦截）
         buf = b""
         tc_map = {}
         content_parts = []
@@ -584,7 +706,21 @@ def chat_completions():
 
                         # 收集 tool_calls（不转发）
                         for tc in delta.get("tool_calls", []):
-                            has_tool_calls = True
+                            if not has_tool_calls:
+                                # 第一次检测到 tool_calls：立刻补发 finish_reason:stop，
+                                # 让 Chatbox 认为第一段回复已正常结束，不再等待也不超时重试。
+                                # 如果前面没有任何文字内容，补一个空格占位，
+                                # 避免 Chatbox 收到空消息。
+                                if not content_parts:
+                                    yield _make_sse_chunk(
+                                        content=" ", resp_id=resp_id,
+                                        created=resp_created, model_id=model_id
+                                    )
+                                yield _make_sse_chunk(
+                                    finish_reason="stop", resp_id=resp_id,
+                                    created=resp_created, model_id=model_id
+                                )
+                                has_tool_calls = True
                             idx = tc.get("index", 0)
                             if idx not in tc_map:
                                 tc_map[idx] = {
@@ -607,7 +743,7 @@ def chat_completions():
                     except Exception:
                         pass
         except Exception as e:
-            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
+            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop", model_id=model_id)
             yield b"data: [DONE]\n\n"
             return
         finally:
@@ -617,24 +753,29 @@ def chat_completions():
         tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
 
         if not tool_calls:
-            # 无工具调用，补发结束 chunk
             log.info("[stream] 无工具调用，完成")
             if conv_id:
                 _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
-            yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created)
+            yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
             yield b"data: [DONE]\n\n"
             return
 
         # 有工具调用：执行工具，第二轮结果追加到同一个流
-        # === 添加详细工具调用日志 ===
         log.info(f"[TOOL] 检测到 {len(tool_calls)} 个工具调用:")
         for i, tc in enumerate(tool_calls):
             func_name = tc.get("function", {}).get("name", "")
             func_args_raw = tc.get("function", {}).get("arguments", "")
             log.info(f"  [{i+1}] {func_name}")
             log.info(f"      raw_args: {repr(func_args_raw[:150])}")
-        
-        yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n", resp_id=resp_id, created=resp_created)
+
+        # 用新的 resp_id 开启第二段消息，让 Chatbox 把工具执行结果当成独立回复
+        tool_resp_id = f"chatcmpl-tool-{int(time.time())}"
+        tool_created = int(time.time())
+        yield _make_sse_chunk(
+            content="⚙️ 正在执行工具...\n\n",
+            resp_id=tool_resp_id, created=tool_created,
+            role="assistant", model_id=model_id
+        )
 
         assistant_msg = {
             "role": "assistant",
@@ -645,12 +786,11 @@ def chat_completions():
         tool_results = execute_all_tool_calls(tool_calls)
         messages.extend(tool_results)
         
-        # === 添加执行结果日志 ===
         log.info(f"[TOOL] 执行完毕，结果长度: {[len(r['content']) for r in tool_results]}")
         log.info("[stream] 发起第二轮流式请求")
 
         try:
-            second_resp = call_llm_stream(messages)
+            second_resp = call_llm_stream(messages, model_id=model_id)
         except RuntimeError as e:
             yield from make_error_stream(str(e))
             return
@@ -675,7 +815,7 @@ def chat_completions():
                         except Exception:
                             pass
         except Exception as e:
-            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
+            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop", model_id=model_id)
             yield b"data: [DONE]\n\n"
         finally:
             second_resp.close()
@@ -687,18 +827,25 @@ def chat_completions():
 
 @app.route('/v1/models', methods=['GET'])
 def list_models():
-    """OpenAI 兼容的模型列表端点，Chatbox 连接检测时会调用。"""
-    return jsonify({
-        "object": "list",
-        "data": [
-            {
-                "id": MODEL_NAME,
+    """OpenAI 兼容的模型列表端点，返回 models_config.json 中所有模型。"""
+    models = []
+    for provider in MODELS_CONFIG.get("providers", {}).values():
+        for model in provider.get("models", []):
+            models.append({
+                "id": model["id"],
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "termux-agent"
-            }
-        ]
-    })
+                "owned_by": provider.get("name", "termux-agent")
+            })
+    # 如果配置为空，至少返回默认模型
+    if not models:
+        models.append({
+            "id": get_default_model_id(),
+            "object": "model",
+            "created": 1700000000,
+            "owned_by": "termux-agent"
+        })
+    return jsonify({"object": "list", "data": models})
 
 
 @app.route('/v1/sessions', methods=['DELETE'])

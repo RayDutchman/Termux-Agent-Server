@@ -8,6 +8,7 @@
 - 💾 **会话记忆** - 维护对话历史，解决 Chatbox 不存储 tool_calls 导致的 AI 失忆问题
 - 🌊 **流式输出** - 支持流式和非流式两种模式
 - 📝 **详细日志** - 完整的请求、会话、工具调用日志
+- 🤖 **多模型支持** - 通过 `models_config.json` 配置多个 Provider 和模型，Chatbox 可自由切换
 - 🔌 **OpenAI 兼容** - 提供标准的 OpenAI API 接口
 
 ## 架构说明
@@ -205,7 +206,137 @@ hostname -I
 | `search_phone_files` | 搜索文件 | "搜索所有 .py 文件" |
 | `get_phone_system_status` | 系统状态 | "获取系统状态" |
 
-## 配置说明
+## 多模型支持
+
+### 工作原理
+
+服务器启动时读取 `models_config.json`，其中可以配置多个 API Provider（如 LMU AI、OpenAI、Anthropic 等），每个 Provider 下可以有多个模型。
+
+Chatbox 调用 `/v1/models` 时，服务器返回所有已配置的模型列表，用户可以在 Chatbox 的模型选择器中自由切换。每次请求时，服务器根据请求中的 `model` 字段自动路由到对应的 Provider 和 API Key。
+
+### 配置文件结构
+
+`models_config.json` 示例（参考 `models_config.example.json`）：
+
+```json
+{
+  "providers": {
+    "lmuai": {
+      "name": "LMU AI",
+      "api_base": "https://api.lmuai.com",
+      "api_key": "sk-xxx...",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "supports_tools": true,
+          "max_tokens": 8192
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "supports_tools": true,
+          "max_tokens": 8192
+        }
+      ]
+    },
+    "openai": {
+      "name": "OpenAI",
+      "api_base": "https://api.openai.com",
+      "api_key": "sk-yyy...",
+      "models": [
+        {
+          "id": "gpt-4-turbo",
+          "name": "GPT-4 Turbo",
+          "supports_tools": true,
+          "max_tokens": 8192
+        }
+      ]
+    }
+  },
+  "default_provider": "lmuai",
+  "default_model": "claude-sonnet-4-6"
+}
+```
+
+**注意**：`models_config.json` 已加入 `.gitignore`，不会被提交到 Git，保护 API Key 安全。首次使用请复制 `models_config.example.json` 并填入真实 Key。
+
+### 使用 update_models.py 管理模型
+
+`update_models.py` 是配套的模型管理脚本，支持两种使用方式：
+
+#### 交互菜单（推荐）
+
+```bash
+python update_models.py
+```
+
+进入菜单后可以：
+1. 列出所有模型
+2. 添加新的 Provider
+3. 添加模型到现有 Provider
+4. 删除 Provider 或模型
+5. 测试 API 连接
+6. 设置默认模型
+
+每次保存时，脚本会**同时写入文件并打印完整配置内容**，方便确认。
+
+#### 命令行参数（快捷方式）
+
+```bash
+python update_models.py list          # 列出所有模型
+python update_models.py add-provider  # 交互式添加 Provider
+python update_models.py add-model     # 交互式添加模型
+python update_models.py remove        # 删除 Provider 或模型
+python update_models.py test          # 测试 API 连接
+python update_models.py set-default   # 设置默认模型
+```
+
+#### 示例：添加 OpenAI Provider
+
+```
+$ python update_models.py add-provider
+
+=== 添加新的 API Provider ===
+
+Provider ID（如 openai、anthropic、lmuai）: openai
+Provider 显示名称 [openai]: OpenAI
+API Base URL（如 https://api.openai.com）: https://api.openai.com
+API Key（输入后会遮盖显示）: sk-xxx...
+
+✓ Provider 'OpenAI' 已添加（API Key: sk-xxx...xxx）
+
+是否立即添加模型到此 Provider？ [Y/n]: y
+
+--- 向 OpenAI 添加模型 ---
+模型 ID（如 gpt-4o、claude-3-5-sonnet-20241022）: gpt-4o
+模型显示名称 [gpt-4o]: GPT-4o
+支持工具调用（function calling）？ [Y/n]: y
+最大 Token 数 [8192]:
+
+✓ 模型 'gpt-4o' 已添加
+
+继续添加更多模型？ [y/N]: n
+
+============================================================
+已写入 /path/to/models_config.json：
+============================================================
+{
+  "providers": { ... }
+}
+============================================================
+```
+
+### 修改配置后重启服务
+
+`models_config.json` 在服务器启动时加载一次，修改后需要重启服务才能生效：
+
+```bash
+pkill -f server_stream.py
+nohup python server_stream.py > ~/server.log 2>&1 &
+```
+
+
 
 ### 服务器配置
 
