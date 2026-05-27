@@ -55,17 +55,17 @@ _FALLBACK_CONFIG = {
 
 
 def _load_models_config() -> dict:
-    """加载 models_config.json，失败时返回兜底配置。"""
+    """Load models_config.json, fall back to hardcoded defaults on failure."""
     try:
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        log.info(f"[CONFIG] 已加载 models_config.json，providers={list(cfg.get('providers', {}).keys())}")
+        log.info(f"[CONFIG] Loaded models_config.json, providers={list(cfg.get('providers', {}).keys())}")
         return cfg
     except FileNotFoundError:
-        log.warning(f"[CONFIG] models_config.json 不存在，使用兜底配置")
+        log.warning("[CONFIG] models_config.json not found, using fallback config")
         return _FALLBACK_CONFIG
     except Exception as e:
-        log.error(f"[CONFIG] 加载 models_config.json 失败: {e}，使用兜底配置")
+        log.error(f"[CONFIG] Failed to load models_config.json: {e}, using fallback config")
         return _FALLBACK_CONFIG
 
 
@@ -91,7 +91,7 @@ def get_provider_for_model(model_id: str):
         (m for m in default_provider.get("models", []) if m["id"] == default_model_id),
         {"id": default_model_id, "supports_tools": True, "max_tokens": 8192}
     )
-    log.warning(f"[CONFIG] 模型 {model_id!r} 未找到，回退到默认: {default_model_id!r}")
+    log.warning(f"[CONFIG] Model {model_id!r} not found, falling back to default: {default_model_id!r}")
     return default_provider, default_model
 
 
@@ -110,43 +110,38 @@ def _get_session(conv_id: str) -> list:
     with _sessions_lock:
         history = list(_sessions.get(conv_id, []))
 
-    # 清理末尾孤立的 tool_calls：
-    # 如果 session 末尾有 assistant 消息带 tool_calls，但后面没有对应的 tool result，
-    # 说明上次工具执行被中断（Chatbox 拦截或网络错误），直接截掉这段残缺历史，
-    # 避免 AI 下次看到未完成的 tool_calls 而无限重试。
+    # Clean up orphaned tool_calls at the end of session history.
+    # If the last message is an assistant message with tool_calls but no following
+    # tool result, the previous execution was interrupted (Chatbox interception or
+    # network error). Trim the dangling tail to prevent infinite retry loops.
     cleaned = list(history)
     while cleaned:
         last = cleaned[-1]
         if last.get("role") == "assistant" and last.get("tool_calls"):
-            # 末尾是带 tool_calls 的 assistant 消息，属于孤立状态
-            log.warning(f"[SESSION] 检测到末尾孤立 tool_calls，清理 conv_id={conv_id!r}")
+            log.warning(f"[SESSION] Orphaned tool_calls detected, cleaning conv_id={conv_id!r}")
             cleaned.pop()
         elif last.get("role") == "tool":
-            # tool result 后面应该跟着 assistant 回复，如果没有也清理
+            # tool result without a following assistant reply — also trim
             cleaned.pop()
         else:
             break
     if len(cleaned) != len(history):
-        log.warning(f"[SESSION] 清理了 {len(history) - len(cleaned)} 条孤立消息")
+        log.warning(f"[SESSION] Removed {len(history) - len(cleaned)} orphaned message(s)")
         with _sessions_lock:
             _sessions[conv_id] = cleaned
     return cleaned
 
 
 def _save_session(conv_id: str, messages: list):
-    """保存历史，超出 SESSION_MAX_TURNS 时裁剪最早的轮次（保留 system prompt）。"""
+    """Save history, trimming oldest turns when SESSION_MAX_TURNS is exceeded."""
     with _sessions_lock:
-        # messages[0] 是 system prompt，从 [1:] 开始算轮次
         history = [m for m in messages if m.get("role") != "system"]
-        # 每轮至少包含 user + assistant，粗略按消息数裁剪
         max_msgs = SESSION_MAX_TURNS * 4  # user + assistant(tool_calls) + tool + assistant
         before_trim = len(history)
         if len(history) > max_msgs:
             history = history[-max_msgs:]
         _sessions[conv_id] = history
-        
-        # === 添加保存日志 ===
-        log.info(f"[SESSION] 保存 conv_id={conv_id!r}, 消息数: {before_trim} -> {len(history)}")
+        log.info(f"[SESSION] Saved conv_id={conv_id!r}, messages: {before_trim} -> {len(history)}")
 
 
 def _clear_session(conv_id: str):
@@ -386,14 +381,13 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
         payload["tools"] = tools
 
     t0 = time.time()
-    log.info(f"[sync] model={model_id!r}, provider={provider.get('name')}, 消息数={len(messages)}, 带工具={tools is not None}")
-    # 打印最后 3 条消息摘要
+    log.info(f"[sync] model={model_id!r}, provider={provider.get('name')}, messages={len(messages)}, tools={'yes' if tools else 'no'}")
     if len(messages) > 1:
         for i, msg in enumerate(messages[-3:]):
             role = msg.get("role", "")
             content_preview = str(msg.get("content", ""))[:80] if msg.get("content") else ""
-            has_tool_calls = "tool_calls" in msg
-            log.info(f"  msg[{len(messages)-3+i}]: role={role}, has_tool_calls={has_tool_calls}, content={content_preview}...")
+            has_tc = "tool_calls" in msg
+            log.info(f"  msg[{len(messages)-3+i}]: role={role}, tool_calls={has_tc}, content={content_preview}...")
     try:
         resp = requests.post(
             api_url, json=payload,
@@ -402,14 +396,14 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
         )
         resp.raise_for_status()
         result = json.loads(resp.content.decode("utf-8"))
-        log.info(f"[sync] 完成，耗时={time.time()-t0:.1f}s")
+        log.info(f"[sync] Done in {time.time()-t0:.1f}s")
         return result
     except requests.exceptions.Timeout:
-        raise RuntimeError("上游 LLM 请求超时")
+        raise RuntimeError("Upstream LLM request timed out")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"上游 LLM 返回错误: {e.response.status_code} {e.response.text[:200]}")
+        raise RuntimeError(f"Upstream LLM error: {e.response.status_code} {e.response.text[:200]}")
     except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-        raise RuntimeError(f"请求或解析失败: {str(e)}")
+        raise RuntimeError(f"Request/parse failed: {str(e)}")
 
 
 def call_llm_stream(messages, tools=None, model_id: str = None):
@@ -425,7 +419,7 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
     if tools and model.get("supports_tools", True):
         payload["tools"] = tools
 
-    log.info(f"[stream] model={model_id!r}, provider={provider.get('name')}, 消息数={len(messages)}")
+    log.info(f"[stream] model={model_id!r}, provider={provider.get('name')}, messages={len(messages)}")
     try:
         resp = requests.post(
             api_url, json=payload,
@@ -435,57 +429,56 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
         resp.raise_for_status()
         return resp
     except requests.exceptions.Timeout:
-        raise RuntimeError("上游 LLM 请求超时")
+        raise RuntimeError("Upstream LLM request timed out")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"上游 LLM 返回错误: {e.response.status_code} {e.response.text[:200]}")
+        raise RuntimeError(f"Upstream LLM error: {e.response.status_code} {e.response.text[:200]}")
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"网络请求失败: {str(e)}")
+        raise RuntimeError(f"Network request failed: {str(e)}")
 
 
 # ==== 5. 工具执行 ====
 
 def execute_all_tool_calls(tool_calls):
-    """执行所有 tool_calls，返回 tool 消息列表。"""
+    """Execute all tool_calls and return a list of tool result messages."""
     results = []
     for tool_call in tool_calls:
         func_info = tool_call.get("function", {})
         func_name = func_info.get("name", "")
         tool_call_id = tool_call.get("id", "unknown")
 
-        # === 添加参数解析日志 ===
         raw_arguments = func_info.get("arguments", "{}")
         log.info(f"[TOOL_EXEC] {func_name}, raw_arguments={raw_arguments[:200]}")
-        
-        # === 修复上游 API 返回的错误格式：去掉开头的 {} ===
+
+        # Fix malformed upstream API response: strip leading '{}'
         if raw_arguments.startswith("{}"):
             raw_arguments = raw_arguments[2:]
-            log.info(f"[TOOL_EXEC] 检测到并移除开头的 {{}}, 修正后: {raw_arguments[:200]}")
-        
+            log.info(f"[TOOL_EXEC] Stripped leading {{}} from arguments: {raw_arguments[:200]}")
+
         try:
             func_args = json.loads(raw_arguments)
             if not isinstance(func_args, dict):
                 func_args = {}
         except json.JSONDecodeError as e:
-            log.warning(f"[TOOL_EXEC] JSON 解析失败: {e}")
+            log.warning(f"[TOOL_EXEC] JSON parse failed: {e}")
             func_args = {}
-        
+
         log.info(f"[TOOL_EXEC] {func_name}, parsed_args={func_args}")
 
         if not func_name:
-            result = "错误: 工具名称为空"
+            result = "Error: empty tool name"
         elif func_name in tools_map:
             try:
                 result = tools_map[func_name](**func_args)
             except TypeError as e:
-                result = f"错误: 工具参数不匹配 ({str(e)})，收到的参数: {func_args}"
+                result = f"Error: argument mismatch ({str(e)}), received: {func_args}"
             except Exception as e:
-                result = f"错误: 工具执行异常: {str(e)}"
+                result = f"Error: tool execution failed: {str(e)}"
         else:
-            result = f"错误: 未知工具 {func_name}"
+            result = f"Error: unknown tool '{func_name}'"
 
         result_str = str(result)
         if len(result_str) > TOOL_OUTPUT_MAX_CHARS:
-            result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + "\n...[已截断]"
+            result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + "\n...[truncated]"
 
         results.append({
             "role": "tool",
@@ -520,41 +513,35 @@ def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, cre
 
 
 def stream_proxy(upstream_resp):
-    """
-    按 SSE 事件边界透传上游流。
-    SSE 协议每个事件以 \\n\\n 结尾，iter_content 按原始字节块传输，
-    不会在 JSON 内容中间截断，是最安全的透传方式。
-    """
+    """Proxy upstream SSE stream by event boundary."""
     try:
         for chunk in upstream_resp.iter_content(chunk_size=4096):
             if chunk:
                 yield chunk
     except Exception as e:
-        yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
+        yield _make_sse_chunk(content=f"[stream interrupted: {str(e)}]", finish_reason="stop")
         yield b"data: [DONE]\n\n"
     finally:
         upstream_resp.close()
 
 
 def wrap_as_stream(data):
-    """把非流式响应 dict 包装成合规的 SSE chunk 序列，不重复请求。"""
+    """Wrap a non-streaming response dict into a compliant SSE chunk sequence."""
     choices = data.get("choices", [])
     resp_id = data.get("id", "")
     created = data.get("created", int(time.time()))
     content = (choices[0].get("message", {}).get("content") or "") if choices else ""
     finish_reason = (choices[0].get("finish_reason") or "stop") if choices else "stop"
 
-    # 第一个 chunk：role + content
     yield _make_sse_chunk(content=content, resp_id=resp_id, role="assistant", created=created)
-    # 最后一个 chunk：finish_reason，delta 为空
     yield _make_sse_chunk(finish_reason=finish_reason, resp_id=resp_id, created=created)
     yield b"data: [DONE]\n\n"
 
 
 def make_error_stream(message):
-    """把错误信息包装成合法的 SSE chunk 序列。"""
+    """Wrap an error message into a valid SSE chunk sequence."""
     err_id = f"err-{int(time.time())}"
-    yield _make_sse_chunk(content=f"[错误] {message}", resp_id=err_id, role="assistant")
+    yield _make_sse_chunk(content=f"[error] {message}", resp_id=err_id, role="assistant")
     yield _make_sse_chunk(finish_reason="stop", resp_id=err_id)
     yield b"data: [DONE]\n\n"
 
@@ -598,20 +585,19 @@ def chat_completions():
     system_prompt = {
         "role": "system",
         "content": (
-            f"你是一个运行在安卓手机 Termux 里的多功能 AI 助手。"
-            f"你的工作目录是 {DOWNLOAD_DIR}。"
-            f"需要操作文件或执行命令时，请调用对应工具；"
-            f"普通对话直接回复即可，不要无谓地调用工具。"
+            f"You are a versatile AI assistant running inside Termux on an Android phone. "
+            f"Your working directory is {DOWNLOAD_DIR}. "
+            f"Use the available tools when you need to read/write files or run commands. "
+            f"For general conversation, reply directly without calling tools unnecessarily."
         )
     }
 
     server_history = _get_session(conv_id) if conv_id else []
 
-    # 追加最新 user 消息前，检查最近几条历史里是否已经有完全相同的内容，
-    # 避免用户重发同一条消息时在 session 里重复堆积。
+    # Check recent history to avoid appending duplicate user messages
+    # (e.g. when the user resends the same message multiple times)
     if latest_user_msg:
         latest_content = latest_user_msg.get("content", "")
-        # 检查最近 6 条消息里有没有相同内容的 user 消息
         recent = server_history[-6:] if len(server_history) >= 6 else server_history
         already_in_history = any(
             m.get("role") == "user" and m.get("content", "") == latest_content
@@ -619,9 +605,9 @@ def chat_completions():
         )
         if not already_in_history:
             server_history.append(latest_user_msg)
-            log.info(f"[SESSION] 追加新 user 消息")
+            log.info("[SESSION] Appended new user message")
         else:
-            log.info(f"[SESSION] user 消息已在近期历史中，跳过追加（防重复）")
+            log.info("[SESSION] Duplicate user message detected, skipping append")
 
     log.info(f"[SESSION] history_length={len(server_history)}")
 
@@ -637,19 +623,19 @@ def chat_completions():
         choice = safe_get_choice(first_data)
 
         if choice.get("tool_calls"):
-            log.info(f"[TOOL] 检测到 {len(choice['tool_calls'])} 个工具调用:")
+            log.info(f"[TOOL] {len(choice['tool_calls'])} tool call(s) detected:")
             for i, tc in enumerate(choice["tool_calls"]):
                 func_name = tc.get("function", {}).get("name", "")
                 func_args_raw = tc.get("function", {}).get("arguments", "")
                 log.info(f"  [{i+1}] {func_name}")
                 log.info(f"      raw_args: {repr(func_args_raw[:150])}")
-            
+
             messages.append(choice)
             tool_results = execute_all_tool_calls(choice["tool_calls"])
             messages.extend(tool_results)
-            
-            log.info(f"[TOOL] 执行完毕，结果长度: {[len(r['content']) for r in tool_results]}")
-            log.info(f"[tool] 发起第二轮请求")
+
+            log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
+            log.info("[TOOL] Sending second round request")
             try:
                 second_data = call_llm_sync(messages, model_id=model_id)
                 if conv_id:
@@ -743,7 +729,7 @@ def chat_completions():
                     except Exception:
                         pass
         except Exception as e:
-            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop", model_id=model_id)
+            yield _make_sse_chunk(content=f"[stream interrupted: {str(e)}]", finish_reason="stop", model_id=model_id)
             yield b"data: [DONE]\n\n"
             return
         finally:
@@ -753,15 +739,15 @@ def chat_completions():
         tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
 
         if not tool_calls:
-            log.info("[stream] 无工具调用，完成")
+            log.info("[stream] No tool calls, done")
             if conv_id:
                 _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
             yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
             yield b"data: [DONE]\n\n"
             return
 
-        # 有工具调用：执行工具，第二轮结果追加到同一个流
-        log.info(f"[TOOL] 检测到 {len(tool_calls)} 个工具调用:")
+        # Tool calls detected: execute tools and stream second round
+        log.info(f"[TOOL] {len(tool_calls)} tool call(s) detected:")
         for i, tc in enumerate(tool_calls):
             func_name = tc.get("function", {}).get("name", "")
             func_args_raw = tc.get("function", {}).get("arguments", "")
@@ -772,7 +758,7 @@ def chat_completions():
         tool_resp_id = f"chatcmpl-tool-{int(time.time())}"
         tool_created = int(time.time())
         yield _make_sse_chunk(
-            content="⚙️ 正在执行工具...\n\n",
+            content="Running tools...\n\n",
             resp_id=tool_resp_id, created=tool_created,
             role="assistant", model_id=model_id
         )
@@ -786,8 +772,8 @@ def chat_completions():
         tool_results = execute_all_tool_calls(tool_calls)
         messages.extend(tool_results)
         
-        log.info(f"[TOOL] 执行完毕，结果长度: {[len(r['content']) for r in tool_results]}")
-        log.info("[stream] 发起第二轮流式请求")
+        log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
+        log.info("[stream] Sending second round stream request")
 
         try:
             second_resp = call_llm_stream(messages, model_id=model_id)
@@ -815,7 +801,7 @@ def chat_completions():
                         except Exception:
                             pass
         except Exception as e:
-            yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop", model_id=model_id)
+            yield _make_sse_chunk(content=f"[stream interrupted: {str(e)}]", finish_reason="stop", model_id=model_id)
             yield b"data: [DONE]\n\n"
         finally:
             second_resp.close()
@@ -850,36 +836,69 @@ def list_models():
 
 @app.route('/v1/sessions', methods=['DELETE'])
 def clear_sessions():
-    """清空所有 session 历史，调试用。"""
+    """Clear all session history (debug use)."""
     with _sessions_lock:
         _sessions.clear()
-    return jsonify({"status": "ok", "message": "所有 session 已清空"})
+    return jsonify({"status": "ok", "message": "All sessions cleared"})
 
 
 @app.route('/v1/sessions/<conv_id>', methods=['DELETE'])
 def clear_session(conv_id):
-    """清空指定 session 历史。"""
+    """Clear a specific session."""
     _clear_session(conv_id)
-    return jsonify({"status": "ok", "message": f"session {conv_id} 已清空"})
+    return jsonify({"status": "ok", "message": f"Session {conv_id} cleared"})
 
 
 if __name__ == '__main__':
-    # ==== 启动前交互确认 ====
+    # ==== Startup configuration prompt ====
+
+    import select
+    import sys
 
     def _mask_key(key: str) -> str:
-        """显示 API Key 前6位和后6位，中间用 ... 替代。"""
+        """Show first 6 and last 6 chars of an API key, mask the middle."""
         if not key:
-            return "（未设置）"
+            return "(not set)"
         if len(key) <= 12:
             return key
         return key[:6] + "..." + key[-6:]
 
+    def _fetch_models(api_base: str, api_key: str) -> list:
+        """
+        Call GET /v1/models on the provider and return a list of model dicts.
+        Each dict has at least {"id": str, "name": str, "supports_tools": True}.
+        Returns an empty list on failure.
+        """
+        url = f"{api_base.rstrip('/')}/v1/models"
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            models = []
+            for m in data.get("data", []):
+                mid = m.get("id", "")
+                if mid:
+                    models.append({
+                        "id": mid,
+                        "name": mid,
+                        "supports_tools": True,
+                        "max_tokens": 8192
+                    })
+            return models
+        except Exception as e:
+            print(f"  [warn] Failed to fetch models from {url}: {e}")
+            return []
+
     def _print_providers(cfg: dict):
-        """格式化打印所有 Provider 信息。"""
+        """Pretty-print all providers with their fetched model lists."""
         providers = cfg.get("providers", {})
         default_model = cfg.get("default_model", "")
         if not providers:
-            print("  （暂无配置）")
+            print("  (no providers configured)")
             return
         for pid, p in providers.items():
             print(f"\n  Provider : {p.get('name', pid)}  [{pid}]")
@@ -887,41 +906,79 @@ if __name__ == '__main__':
             print(f"  API Key  : {_mask_key(p.get('api_key', ''))}")
             models = p.get("models", [])
             if models:
-                print(f"  模型     :", end="")
+                print(f"  Models   :", end="")
                 for i, m in enumerate(models):
-                    mark = " ←默认" if m["id"] == default_model else ""
+                    mark = " <- default" if m["id"] == default_model else ""
                     prefix = "           " if i > 0 else " "
                     print(f"{prefix}{m['id']}{mark}")
             else:
-                print(f"  模型     : （暂无）")
+                print("  Models   : (none)")
 
     def _save_config(cfg: dict):
-        """写回 models_config.json。"""
+        """Write cfg back to models_config.json."""
         with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
 
+    def _refresh_all_models(cfg: dict) -> dict:
+        """
+        For every provider in cfg, call /v1/models and replace the models list.
+        Also update default_model to the first model of default_provider if the
+        current default_model is no longer in the fetched list.
+        """
+        for pid, p in cfg.get("providers", {}).items():
+            print(f"  Fetching models from {p.get('name', pid)} ...", end=" ", flush=True)
+            fetched = _fetch_models(p.get("api_base", ""), p.get("api_key", ""))
+            if fetched:
+                p["models"] = fetched
+                print(f"{len(fetched)} model(s) found")
+            else:
+                print("failed, keeping existing list")
+
+        # Fix default_model if it no longer exists
+        all_ids = [
+            m["id"]
+            for p in cfg.get("providers", {}).values()
+            for m in p.get("models", [])
+        ]
+        if cfg.get("default_model") not in all_ids and all_ids:
+            cfg["default_model"] = all_ids[0]
+            default_pid = cfg.get("default_provider", "")
+            # Try to pick from default_provider first
+            dp_ids = [
+                m["id"]
+                for m in cfg.get("providers", {}).get(default_pid, {}).get("models", [])
+            ]
+            if dp_ids:
+                cfg["default_model"] = dp_ids[0]
+            print(f"  Default model updated to: {cfg['default_model']}")
+        return cfg
+
     def _startup_prompt():
         """
-        启动前显示配置信息，询问用户是否继续。
-        10 秒无输入自动视为 Y。
-        返回最终确认后的 cfg（可能已被用户修改）。
+        Show config info, fetch live model lists, and ask the user to confirm
+        before starting the server. Auto-continues after 10 seconds of no input.
+        Returns the final cfg (possibly modified by the user).
         """
-        import select
-        import sys
-
         cfg = _load_models_config()
 
         while True:
-            print("\n" + "=" * 55)
-            print("  Termux Agent Server — 启动配置确认")
+            # Fetch live model lists for all providers
+            print()
+            print("=" * 55)
+            print("  Fetching model lists from API...")
+            print("=" * 55)
+            cfg = _refresh_all_models(cfg)
+            _save_config(cfg)
+
+            print()
+            print("=" * 55)
+            print("  Termux Agent Server — Startup Config")
             print("=" * 55)
             _print_providers(cfg)
             print()
 
-            # 10 秒倒计时自动 Y
-            print("  继续启动？[Y/n]（10 秒无输入自动继续）", end=" ", flush=True)
+            print("  Continue? [Y/n]  (auto-yes in 10s)", end=" ", flush=True)
 
-            # select 检测 stdin 是否有输入（仅 Unix 有效）
             answered = False
             user_input = ""
             try:
@@ -930,7 +987,6 @@ if __name__ == '__main__':
                     user_input = sys.stdin.readline().strip().lower()
                     answered = True
             except Exception:
-                # Windows 或非 tty 环境下 select 不可用，直接读取
                 try:
                     user_input = input().strip().lower()
                     answered = True
@@ -938,51 +994,50 @@ if __name__ == '__main__':
                     pass
 
             if not answered or user_input in ("", "y", "yes"):
-                print("  → 启动服务器")
+                print("  -> Starting server")
                 break
 
-            # 用户选择修改
+            # User wants to edit a provider
             print()
             providers = cfg.get("providers", {})
             pids = list(providers.keys())
 
-            if len(pids) == 0:
-                print("  没有可修改的 Provider，直接启动")
+            if not pids:
+                print("  No providers to edit, starting anyway")
                 break
             elif len(pids) == 1:
                 pid = pids[0]
             else:
-                print("  选择要修改的 Provider：")
+                print("  Select provider to edit:")
                 for i, pid_ in enumerate(pids, 1):
                     print(f"    {i}. {providers[pid_].get('name', pid_)}  [{pid_}]")
                 while True:
-                    sel = input("  请输入编号: ").strip()
+                    sel = input("  Enter number: ").strip()
                     if sel.isdigit() and 1 <= int(sel) <= len(pids):
                         pid = pids[int(sel) - 1]
                         break
-                    print("  输入无效，请重试")
+                    print("  Invalid input, try again")
 
             p = providers[pid]
-            print(f"\n  修改 Provider: {p.get('name', pid)}")
-            print(f"  （直接回车保留原值）")
+            print(f"\n  Editing: {p.get('name', pid)}")
+            print("  (press Enter to keep current value)")
 
-            new_url = input(f"  新 URL [{p.get('api_base', '')}]: ").strip()
-            new_key = input(f"  新 API Key [{_mask_key(p.get('api_key', ''))}]: ").strip()
+            new_url = input(f"  New URL [{p.get('api_base', '')}]: ").strip()
+            new_key = input(f"  New API Key [{_mask_key(p.get('api_key', ''))}]: ").strip()
 
             if new_url:
                 p["api_base"] = new_url.rstrip("/")
             if new_key:
                 p["api_key"] = new_key
 
-            # 写回配置文件
             _save_config(cfg)
-            print("  ✓ 已保存到 models_config.json")
-            # 回到顶部重新显示
+            print("  Saved to models_config.json")
+            # Loop back to top: re-fetch models and re-display
 
         return cfg
 
-    # 执行启动确认，并用确认后的配置覆盖全局 MODELS_CONFIG
+    # Run startup prompt and update global MODELS_CONFIG
     MODELS_CONFIG = _startup_prompt()
 
-    # 监听所有网络接口，允许局域网访问
+    # Start Flask server
     app.run(host='0.0.0.0', port=5846, debug=False, threaded=True)
