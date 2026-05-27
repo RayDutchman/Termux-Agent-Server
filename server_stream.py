@@ -63,26 +63,39 @@ MODELS_CONFIG: dict = _load_models_config()
 
 def get_provider_for_model(model_id: str):
     """
-    根据 model_id 查找对应的 provider 配置和 model 配置。
-    返回 (provider_dict, model_dict)，找不到时返回 (default_provider, default_model)。
+    Look up the provider and model config for a given model_id.
+    Returns (provider_dict, model_dict).
+
+    Fallback priority:
+    1. Exact match in any provider's models list.
+    2. If not found but only one provider exists, use that provider and
+       pass model_id as-is to the upstream API (transparent proxy).
+    3. If multiple providers exist, use the default provider and pass
+       model_id as-is (still transparent — don't swap the model ID).
     """
     for provider in MODELS_CONFIG.get("providers", {}).values():
         for model in provider.get("models", []):
             if model["id"] == model_id:
                 return provider, model
 
-    # 找不到时使用默认 provider + 默认 model
+    # model_id not in our fetched list — build a synthetic model entry
+    # so the upstream receives exactly the model_id the client requested.
+    synthetic_model = {"id": model_id, "supports_tools": True, "max_tokens": 8192}
+
+    providers = MODELS_CONFIG.get("providers", {})
+    if len(providers) == 1:
+        # Single provider: always use it, pass model_id through
+        provider = next(iter(providers.values()))
+        log.warning(f"[CONFIG] Model {model_id!r} not in fetched list, passing through to {provider.get('name')}")
+        return provider, synthetic_model
+
+    # Multiple providers: use default provider, still pass model_id through
     default_provider_id = MODELS_CONFIG.get("default_provider", "")
-    default_model_id = MODELS_CONFIG.get("default_model", "")
-    default_provider = MODELS_CONFIG.get("providers", {}).get(default_provider_id, {})
-    default_model = next(
-        (m for m in default_provider.get("models", []) if m["id"] == default_model_id),
-        {"id": default_model_id, "supports_tools": True, "max_tokens": 8192}
-    )
-    log.warning(f"[CONFIG] Model {model_id!r} not found, falling back to default: {default_model_id!r}")
+    default_provider = providers.get(default_provider_id, next(iter(providers.values()), {}))
+    log.warning(f"[CONFIG] Model {model_id!r} not in fetched list, passing through to default provider {default_provider.get('name')!r}")
     if not default_provider.get("api_key", "").strip():
         log.error("[CONFIG] Default provider has no API key — requests will fail")
-    return default_provider, default_model
+    return default_provider, synthetic_model
 
 
 def get_default_model_id() -> str:
@@ -952,9 +965,9 @@ if __name__ == '__main__':
         print("  No valid provider found. Please configure one now.")
         print("  -----------------------------------------------")
         while True:
-            pid   = input("  Provider ID (e.g. lmuai, openai): ").strip() or "default"
-            name  = input(f"  Display name [{pid}]: ").strip() or pid
-            url   = input("  API Base URL (e.g. https://api.openai.com): ").strip().rstrip("/")
+            pid   = input("  Provider ID   (short tag, e.g. lmuai / openai): ").strip() or "default"
+            name  = input(f"  Display name  (human label, e.g. 'LMU AI') [{pid}]: ").strip() or pid
+            url   = input("  API Base URL  (e.g. https://api.openai.com): ").strip().rstrip("/")
             key   = input("  API Key: ").strip()
             if not url or not key:
                 print("  URL and API Key are required. Try again.\n")
