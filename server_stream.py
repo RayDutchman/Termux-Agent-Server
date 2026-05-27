@@ -675,6 +675,7 @@ def chat_completions():
 
     # ---- 流式模式：边收边发，立刻响应 Chatbox ----
     def _generate():
+        request_start_time = time.time()  # 整个请求的起始时间
         try:
             first_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
@@ -767,12 +768,60 @@ def chat_completions():
         # 每轮：执行工具 → 发工具名提示 → 请求下一轮 → 实时流式转发文字
         # 直到 AI 不再调工具，循环结束。
         MAX_TOOL_ROUNDS = 20  # 防止死循环
+        # 接近 Chatbox 总时长上限时强制中断工具调用，让 AI 直接生成总结
+        # Chatbox 默认总超时约 60-90 秒；留 15 秒余量给最后一轮总结生成
+        BUDGET_SECONDS = 50
         tool_round = 0
         last_round_text = ""  # 最后一轮收到的纯文本（用于 session 保存）
+        budget_exceeded = False  # 标记是否因时间预算被中断
 
         while tool_calls and tool_round < MAX_TOOL_ROUNDS:
+            elapsed = time.time() - request_start_time
+            # 如果剩余时间不足以再做一轮工具调用 + 总结生成，强制中断
+            if elapsed > BUDGET_SECONDS:
+                log.warning(f"[BUDGET] Elapsed {elapsed:.1f}s exceeds budget {BUDGET_SECONDS}s, forcing summary")
+                # 通知用户工具调用被时间预算中断
+                budget_resp_id = f"chatcmpl-budget-{int(time.time())}"
+                budget_created = int(time.time())
+                yield _make_sse_chunk(
+                    content="\n[Time budget reached, generating summary based on collected results...]\n\n",
+                    resp_id=budget_resp_id, created=budget_created,
+                    role="assistant", model_id=model_id
+                )
+                yield _make_sse_chunk(finish_reason="stop", resp_id=budget_resp_id, created=budget_created, model_id=model_id)
+                yield b"data: [DONE]\n\n"
+
+                # 把待执行的 tool_calls 作为已被打断的标记附加（不真正执行）
+                # 然后让 AI 用一个 system 消息引导，立刻生成总结
+                # 注意：要保证 messages 历史合法（assistant tool_calls 必须配对 tool result）
+                # 所以这里给每个未执行的 tool_call 补一个空的 tool result
+                placeholder_results = [
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", "unknown"),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "content": "[skipped: time budget exceeded]",
+                    }
+                    for tc in tool_calls
+                ]
+                messages.append({
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": tool_calls
+                })
+                messages.extend(placeholder_results)
+                messages.append({
+                    "role": "system",
+                    "content": "Time budget exhausted. Stop calling tools NOW. Summarize the results gathered so far and reply directly to the user in plain text."
+                })
+                tool_calls = None
+                # 让循环外的代码再发一次请求生成总结
+                # 用一个标志，跳出循环后处理
+                budget_exceeded = True
+                break
+
             tool_round += 1
-            log.info(f"[TOOL] Round {tool_round}, {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}")
+            log.info(f"[TOOL] Round {tool_round}, {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}, elapsed={elapsed:.1f}s")
 
             # 把本轮 assistant 消息（含 tool_calls）追加到 messages
             messages.append({
@@ -783,7 +832,7 @@ def chat_completions():
 
             # 向 Chatbox 推送工具调用提示（独立消息气泡，按调用顺序列出所有工具名）
             tool_names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
-            # 同名连续合并：cmd, cmd, cmd, list -> cmd ×3, list
+            # 同名连续合并：cmd, cmd, cmd, list -> cmd ×3, list；每个工具单独一行
             display_parts = []
             i = 0
             while i < len(tool_names):
@@ -791,14 +840,14 @@ def chat_completions():
                 count = 1
                 while i + count < len(tool_names) and tool_names[i + count] == name:
                     count += 1
-                display_parts.append(f"{name}" + (f" ×{count}" if count > 1 else ""))
+                display_parts.append(f"  - {name}" + (f" ×{count}" if count > 1 else ""))
                 i += count
-            tool_display = ", ".join(display_parts)
+            tool_display = "\n".join(display_parts)
 
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
             tool_created = int(time.time())
             yield _make_sse_chunk(
-                content=f"Running: {tool_display}\n\n",
+                content=f"Running:\n{tool_display}\n\n",
                 resp_id=tool_resp_id, created=tool_created,
                 role="assistant", model_id=model_id
             )
@@ -853,11 +902,10 @@ def chat_completions():
                     "content": result_str,
                 })
 
-                # 每执行完一个工具，发送进度更新（防止 Chatbox timeout）
+                # 每执行完一个工具，发送一个隐式心跳（不可见空格，防止 Chatbox idle timeout）
                 if idx < len(tool_calls):
-                    progress = f"  ✓ {idx}/{len(tool_calls)} {func_name}\n"
                     yield _make_sse_chunk(
-                        content=progress,
+                        content="",
                         resp_id=tool_resp_id, created=tool_created,
                         model_id=model_id
                     )
@@ -962,6 +1010,58 @@ def chat_completions():
             yield _make_sse_chunk(content="\n\n[工具调用轮次已达上限，停止执行]",
                                   resp_id=resp_id, created=resp_created,
                                   model_id=model_id)
+
+        # 时间预算耗尽：发起最后一次不带 tools 的请求，让 AI 生成总结
+        if budget_exceeded:
+            log.info("[BUDGET] Sending summary-only request (no tools)")
+            summary_resp_id = f"chatcmpl-summary-{int(time.time())}"
+            summary_created = int(time.time())
+            try:
+                summary_resp = call_llm_stream(messages, tools=None, model_id=model_id)
+            except RuntimeError as e:
+                yield _make_sse_chunk(content=f"\n[summary failed: {str(e)}]",
+                                      resp_id=summary_resp_id, created=summary_created,
+                                      role="assistant", model_id=model_id)
+                summary_resp = None
+
+            if summary_resp is not None:
+                summary_collected = []
+                summary_buf = b""
+                first_text_seen = False
+                try:
+                    for chunk in summary_resp.iter_content(chunk_size=4096):
+                        if not chunk:
+                            continue
+                        summary_buf += chunk
+                        while b"\n" in summary_buf:
+                            line_bytes, summary_buf = summary_buf.split(b"\n", 1)
+                            line = line_bytes.decode("utf-8", errors="replace").strip()
+                            if not line.startswith("data:") or "[DONE]" in line:
+                                continue
+                            try:
+                                d = json.loads(line[5:].strip())
+                                delta = d.get("choices", [{}])[0].get("delta", {})
+                                text = delta.get("content")
+                                if text:
+                                    summary_collected.append(text)
+                                    yield _make_sse_chunk(
+                                        content=text,
+                                        resp_id=summary_resp_id, created=summary_created,
+                                        role="assistant" if not first_text_seen else None,
+                                        model_id=model_id
+                                    )
+                                    first_text_seen = True
+                            except Exception:
+                                pass
+                except Exception as e:
+                    yield _make_sse_chunk(content=f"\n[summary stream interrupted: {str(e)}]",
+                                          resp_id=summary_resp_id, created=summary_created,
+                                          model_id=model_id)
+                finally:
+                    summary_resp.close()
+                last_round_text = "".join(summary_collected)
+                resp_id = summary_resp_id
+                resp_created = summary_created
 
         if conv_id:
             _save_session(conv_id, messages + [{"role": "assistant", "content": last_round_text}])
