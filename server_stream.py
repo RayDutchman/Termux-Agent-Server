@@ -7,7 +7,6 @@ import logging
 import threading
 import subprocess
 import requests
-from collections import Counter
 from flask import Flask, request, jsonify, Response
 
 logging.basicConfig(
@@ -640,7 +639,7 @@ def chat_completions():
 
     # ---- 非流式模式：多轮工具调用循环 ----
     if not want_stream:
-        MAX_TOOL_ROUNDS = 10
+        MAX_TOOL_ROUNDS = 20
         try:
             current_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
@@ -765,7 +764,7 @@ def chat_completions():
         # ---- 多轮工具调用循环 ----
         # 每轮：执行工具 → 发工具名提示 → 请求下一轮 → 实时流式转发文字
         # 直到 AI 不再调工具，循环结束。
-        MAX_TOOL_ROUNDS = 10  # 防止死循环
+        MAX_TOOL_ROUNDS = 20  # 防止死循环
         tool_round = 0
         last_round_text = ""  # 最后一轮收到的纯文本（用于 session 保存）
 
@@ -783,15 +782,9 @@ def chat_completions():
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
-            # 向 Chatbox 推送工具调用提示（独立消息气泡，显示工具名）
+            # 向 Chatbox 推送工具调用提示（独立消息气泡，按调用顺序列出所有工具名）
             tool_names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
-            # 同名工具合并显示次数：[read_phone_file ×2, list_phone_dir]
-            name_counts = Counter(tool_names)
-            display_parts = []
-            for name in dict.fromkeys(tool_names):  # 保留顺序去重
-                count = name_counts[name]
-                display_parts.append(f"{name}" + (f" ×{count}" if count > 1 else ""))
-            tool_display = ", ".join(display_parts)
+            tool_display = ", ".join(tool_names)
 
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
             tool_created = int(time.time())
