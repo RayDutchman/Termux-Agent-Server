@@ -16,7 +16,9 @@ An AI Agent server running in Android Termux environment, enabling AI to control
 
 ### 1. Install Termux
 
-Download from [F-Droid](https://f-droid.org/packages/com.termux/) or [GitHub Releases](https://github.com/termux/termux-app/releases) (don't use Google Play version).
+Download from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [F-Droid](https://f-droid.org/packages/com.termux/), or [GitHub Releases](https://github.com/termux/termux-app/releases).
+
+> **Note**: If you plan to use Termux-API features (GPS, camera, SMS, etc.), you must also install the [Termux:API app from F-Droid](https://f-droid.org/packages/com.termux.api/) — it is not available on Google Play.
 
 ### 2. Install Dependencies
 
@@ -108,9 +110,11 @@ tail -f ~/server.log
 Call 40+ Termux-API commands via `execute_local_command`:
 
 ```bash
-# Install Termux-API (requires both App and package)
+# Install the termux-api package inside Termux
 pkg install termux-api -y
 ```
+
+> **Required**: Also install the [Termux:API app from F-Droid](https://f-droid.org/packages/com.termux.api/) — the package above alone is not enough.
 
 **Common Commands:**
 
