@@ -847,69 +847,13 @@ def chat_completions():
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
             tool_created = int(time.time())
             yield _make_sse_chunk(
-                content=f"Running:\n{tool_display}\n\n",
+                content=f"Running tools:\n{tool_display}\n\n",
                 resp_id=tool_resp_id, created=tool_created,
                 role="assistant", model_id=model_id
             )
 
-            # 逐个执行工具，每执行完一个就发送进度更新（防止 timeout）
-            tool_results = []
-            for idx, tool_call in enumerate(tool_calls, 1):
-                func_info = tool_call.get("function", {})
-                func_name = func_info.get("name", "")
-                tool_call_id = tool_call.get("id", "unknown")
-
-                raw_arguments = func_info.get("arguments", "")
-                log.info(f"[TOOL_EXEC] {func_name} args={raw_arguments[:200]}")
-
-                # Fix malformed upstream API response: strip leading '{}'
-                if raw_arguments.startswith("{}"):
-                    raw_arguments = raw_arguments[2:]
-                    log.info(f"[TOOL_EXEC] Stripped leading {{}} from arguments")
-
-                # 空参数直接用 {}，不走 JSON 解析（避免无意义的 WARNING）
-                if not raw_arguments.strip():
-                    func_args = {}
-                else:
-                    try:
-                        func_args = json.loads(raw_arguments)
-                        if not isinstance(func_args, dict):
-                            func_args = {}
-                    except json.JSONDecodeError as e:
-                        log.warning(f"[TOOL_EXEC] JSON parse failed: {e}, raw={raw_arguments[:100]!r}")
-                        func_args = {}
-
-                if not func_name:
-                    result = "Error: empty tool name"
-                elif func_name in tools_map:
-                    try:
-                        result = tools_map[func_name](**func_args)
-                    except TypeError as e:
-                        result = f"Error: argument mismatch ({str(e)}), received: {func_args}"
-                    except Exception as e:
-                        result = f"Error: tool execution failed: {str(e)}"
-                else:
-                    result = f"Error: unknown tool '{func_name}'"
-
-                result_str = str(result)
-                if len(result_str) > TOOL_OUTPUT_MAX_CHARS:
-                    result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + "\n...[truncated]"
-
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": func_name,
-                    "content": result_str,
-                })
-
-                # 每执行完一个工具，发送一个隐式心跳（不可见空格，防止 Chatbox idle timeout）
-                if idx < len(tool_calls):
-                    yield _make_sse_chunk(
-                        content="",
-                        resp_id=tool_resp_id, created=tool_created,
-                        model_id=model_id
-                    )
-
+            # 执行所有工具
+            tool_results = execute_all_tool_calls(tool_calls)
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
