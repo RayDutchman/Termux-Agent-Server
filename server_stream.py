@@ -1128,8 +1128,10 @@ if __name__ == '__main__':
         Loops until the user provides a non-empty URL and API key.
         """
         print()
-        print("  No valid provider found. Please configure one now.")
-        print("  -----------------------------------------------")
+        print("=" * 55)
+        print("  First-time setup: models_config.json not found")
+        print("  Let's configure your first API provider")
+        print("=" * 55)
         while True:
             pid   = input("  Provider ID   (short tag, e.g. openai / anthropic / deepseek): ").strip() or "default"
             name  = input(f"  Display name  (e.g. OpenAI / Anthropic / DeepSeek) [{pid}]: ").strip() or pid
@@ -1150,7 +1152,7 @@ if __name__ == '__main__':
             cfg["default_provider"] = pid
             cfg["default_model"] = ""
             _save_config(cfg)
-            print(f"  Provider '{name}' saved.")
+            print(f"  ✓ Provider '{name}' saved to models_config.json")
             break
         return cfg
 
