@@ -260,7 +260,6 @@ In `server_stream.py` header:
 ```python
 DOWNLOAD_DIR = os.path.expanduser("~")  # Working directory
 TOOL_OUTPUT_MAX_CHARS = 8000            # Tool output limit
-SESSION_MAX_TURNS = 20                  # Session history turns
 ```
 
 ## Project Structure

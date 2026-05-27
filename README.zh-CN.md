@@ -263,7 +263,6 @@ OpenAI 兼容的聊天接口。
 ```python
 DOWNLOAD_DIR = os.path.expanduser("~")  # 工作目录
 TOOL_OUTPUT_MAX_CHARS = 8000            # 工具输出限制
-SESSION_MAX_TURNS = 20                  # 会话历史轮数
 ```
 
 ## 📁 项目结构
