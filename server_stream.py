@@ -537,7 +537,7 @@ def chat_completions():
     want_stream = chatbox_data.get("stream", False)
 
     # 提取 model_id，未指定时使用默认模型
-    model_id = chatbox_data.get("model") or get_default_model_id()
+    model_id = (chatbox_data.get("model") or get_default_model_id()).strip()
 
     # 增强 conv_id 提取逻辑（尝试多种字段名）
     conv_id = (
@@ -947,7 +947,7 @@ if __name__ == '__main__':
             data = resp.json()
             models = []
             for m in data.get("data", []):
-                mid = m.get("id", "")
+                mid = m.get("id", "").strip()  # 防御性去除上游返回的首尾空格
                 if mid:
                     models.append({
                         "id": mid,
