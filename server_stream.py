@@ -864,5 +864,125 @@ def clear_session(conv_id):
 
 
 if __name__ == '__main__':
+    # ==== 启动前交互确认 ====
+
+    def _mask_key(key: str) -> str:
+        """显示 API Key 前6位和后6位，中间用 ... 替代。"""
+        if not key:
+            return "（未设置）"
+        if len(key) <= 12:
+            return key
+        return key[:6] + "..." + key[-6:]
+
+    def _print_providers(cfg: dict):
+        """格式化打印所有 Provider 信息。"""
+        providers = cfg.get("providers", {})
+        default_model = cfg.get("default_model", "")
+        if not providers:
+            print("  （暂无配置）")
+            return
+        for pid, p in providers.items():
+            print(f"\n  Provider : {p.get('name', pid)}  [{pid}]")
+            print(f"  URL      : {p.get('api_base', '')}")
+            print(f"  API Key  : {_mask_key(p.get('api_key', ''))}")
+            models = p.get("models", [])
+            if models:
+                print(f"  模型     :", end="")
+                for i, m in enumerate(models):
+                    mark = " ←默认" if m["id"] == default_model else ""
+                    prefix = "           " if i > 0 else " "
+                    print(f"{prefix}{m['id']}{mark}")
+            else:
+                print(f"  模型     : （暂无）")
+
+    def _save_config(cfg: dict):
+        """写回 models_config.json。"""
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+    def _startup_prompt():
+        """
+        启动前显示配置信息，询问用户是否继续。
+        10 秒无输入自动视为 Y。
+        返回最终确认后的 cfg（可能已被用户修改）。
+        """
+        import select
+        import sys
+
+        cfg = _load_models_config()
+
+        while True:
+            print("\n" + "=" * 55)
+            print("  Termux Agent Server — 启动配置确认")
+            print("=" * 55)
+            _print_providers(cfg)
+            print()
+
+            # 10 秒倒计时自动 Y
+            print("  继续启动？[Y/n]（10 秒无输入自动继续）", end=" ", flush=True)
+
+            # select 检测 stdin 是否有输入（仅 Unix 有效）
+            answered = False
+            user_input = ""
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 10)
+                if ready:
+                    user_input = sys.stdin.readline().strip().lower()
+                    answered = True
+            except Exception:
+                # Windows 或非 tty 环境下 select 不可用，直接读取
+                try:
+                    user_input = input().strip().lower()
+                    answered = True
+                except Exception:
+                    pass
+
+            if not answered or user_input in ("", "y", "yes"):
+                print("  → 启动服务器")
+                break
+
+            # 用户选择修改
+            print()
+            providers = cfg.get("providers", {})
+            pids = list(providers.keys())
+
+            if len(pids) == 0:
+                print("  没有可修改的 Provider，直接启动")
+                break
+            elif len(pids) == 1:
+                pid = pids[0]
+            else:
+                print("  选择要修改的 Provider：")
+                for i, pid_ in enumerate(pids, 1):
+                    print(f"    {i}. {providers[pid_].get('name', pid_)}  [{pid_}]")
+                while True:
+                    sel = input("  请输入编号: ").strip()
+                    if sel.isdigit() and 1 <= int(sel) <= len(pids):
+                        pid = pids[int(sel) - 1]
+                        break
+                    print("  输入无效，请重试")
+
+            p = providers[pid]
+            print(f"\n  修改 Provider: {p.get('name', pid)}")
+            print(f"  （直接回车保留原值）")
+
+            new_url = input(f"  新 URL [{p.get('api_base', '')}]: ").strip()
+            new_key = input(f"  新 API Key [{_mask_key(p.get('api_key', ''))}]: ").strip()
+
+            if new_url:
+                p["api_base"] = new_url.rstrip("/")
+            if new_key:
+                p["api_key"] = new_key
+
+            # 写回配置文件
+            _save_config(cfg)
+            print("  ✓ 已保存到 models_config.json")
+            # 回到顶部重新显示
+
+        return cfg
+
+    # 执行启动确认，并用确认后的配置覆盖全局 MODELS_CONFIG
+    MODELS_CONFIG = _startup_prompt()
+
     # 监听所有网络接口，允许局域网访问
     app.run(host='0.0.0.0', port=5846, debug=False, threaded=True)
