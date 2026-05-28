@@ -813,7 +813,7 @@ def chat_completions():
                 count = 1
                 while i + count < len(tool_names) and tool_names[i + count] == name:
                     count += 1
-                display_parts.append(f"  - {name}" + (f" ×{count}" if count > 1 else ""))
+                display_parts.append(f"  - `{name}`" + (f" ×{count}" if count > 1 else ""))
                 i += count
             tool_display = "\n".join(display_parts)
 
