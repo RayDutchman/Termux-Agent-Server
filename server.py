@@ -617,7 +617,7 @@ def chat_completions():
 
     # ---- Non-streaming mode: multi-round tool calling loop ----
     if not want_stream:
-        MAX_TOOL_ROUNDS = 20
+        MAX_TOOL_ROUNDS = 50
         try:
             current_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
@@ -741,10 +741,10 @@ def chat_completions():
         # ---- Multi-round tool calling loop ----
         # Each round: execute tools → send tool name hint → request next round → forward text in real-time
         # Loop until AI stops calling tools.
-        MAX_TOOL_ROUNDS = 20  # Prevent infinite loop
+        MAX_TOOL_ROUNDS = 50  # Prevent infinite loop
         # Force interrupt tool calling when approaching Chatbox total timeout, let AI generate summary directly
         # Chatbox default total timeout ~60-90s; leave 15s margin for final summary generation
-        BUDGET_SECONDS = 120
+        BUDGET_SECONDS = 1200  # 20 minutes
         tool_round = 0
         budget_exceeded = False  # Flag whether interrupted by time budget
 
