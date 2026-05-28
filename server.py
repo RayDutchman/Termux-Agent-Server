@@ -852,8 +852,8 @@ def chat_completions():
             while tool_exec_thread.is_alive():
                 tool_exec_thread.join(timeout=5)
                 if tool_exec_thread.is_alive():
-                    # Send a space chunk to keep SSE connection alive
-                    yield _make_sse_chunk(content=" ", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+                    # Send standard SSE comment heartbeat (no visible content in Chatbox)
+                    yield b": keepalive\n\n"
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
