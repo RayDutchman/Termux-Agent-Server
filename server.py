@@ -841,10 +841,8 @@ def chat_completions():
                 role="assistant", model_id=model_id
             )
 
-            # Execute all tools in a background thread; send a complete SSE message every 5s
-            # to keep Chatbox from timing out during long-running commands (e.g. tar, GPS).
-            # A complete message (with finish_reason=stop + DONE) is required — bare chunks
-            # without stop are ignored by Chatbox's timeout counter.
+            # Execute all tools in a background thread; send SSE heartbeat every 3s
+            # to prevent Chatbox SSE idle timeout during long-running commands (e.g. tar, GPS)
             tool_results_container = [None]
             tool_exec_thread = threading.Thread(
                 target=lambda: tool_results_container.__setitem__(0, execute_all_tool_calls(tool_calls)),
@@ -853,17 +851,12 @@ def chat_completions():
             tool_exec_thread.start()
             heartbeat_count = 0
             while tool_exec_thread.is_alive():
-                tool_exec_thread.join(timeout=5)
+                tool_exec_thread.join(timeout=3)
                 if tool_exec_thread.is_alive():
                     heartbeat_count += 1
-                    log.info(f"[HEARTBEAT] Sending progress message #{heartbeat_count} while waiting for tools")
-                    # Send a complete standalone message so Chatbox resets its timeout counter
-                    hb_id = f"chatcmpl-hb-{tool_round}-{heartbeat_count}-{int(time.time())}"
-                    hb_created = int(time.time())
-                    dots = "." * heartbeat_count
-                    yield _make_sse_chunk(content=dots, resp_id=hb_id, created=hb_created, role="assistant", model_id=model_id)
-                    yield _make_sse_chunk(finish_reason="stop", resp_id=hb_id, created=hb_created, model_id=model_id)
-                    yield b"data: [DONE]\n\n"
+                    log.info(f"[HEARTBEAT] Sending heartbeat #{heartbeat_count} while waiting for tools")
+                    # Send a space heartbeat to keep SSE connection alive
+                    yield _make_sse_chunk(content=" ", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
             log.info(f"[HEARTBEAT] Tool done after {heartbeat_count} heartbeats")
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
