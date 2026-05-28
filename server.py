@@ -555,8 +555,6 @@ def chat_completions():
         f"Your working directory is {DOWNLOAD_DIR}. "
         f"Use the available tools when you need to read/write files or run commands. "
         f"For general conversation, reply directly without calling tools unnecessarily.\n\n"
-        f"IMPORTANT: Call at most 5 tools per round. If you need more, do them in subsequent rounds. "
-        f"This prevents client-side timeout. Single-round latency must stay under ~50 seconds.\n\n"
         f"Available termux-api commands (use via execute_local_command):\n"
         f"- termux-location: get GPS location (JSON)\n"
         f"- termux-clipboard-get/set: read/write clipboard\n"
