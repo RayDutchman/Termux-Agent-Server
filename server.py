@@ -850,10 +850,10 @@ def chat_completions():
             )
             tool_exec_thread.start()
             while tool_exec_thread.is_alive():
-                tool_exec_thread.join(timeout=3)
+                tool_exec_thread.join(timeout=5)
                 if tool_exec_thread.is_alive():
-                    # Send a space heartbeat to keep SSE connection alive
-                    yield _make_sse_chunk(content=" ", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+                    # Send a dot to show progress and keep SSE connection alive
+                    yield _make_sse_chunk(content=".", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
