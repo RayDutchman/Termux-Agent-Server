@@ -822,7 +822,7 @@ def chat_completions():
                 except Exception:
                     arg_display = raw_args.strip()
                 if arg_display:
-                    lang = "bash" if name == "execute_local_command" else "txt"
+                    lang = "bash" if name == "execute_local_command" else ""
                     display_parts.append(f"  - `{name}`\n```{lang}\n{arg_display}\n```")
                 else:
                     display_parts.append(f"  - `{name}`")
