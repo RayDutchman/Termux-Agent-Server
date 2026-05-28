@@ -1290,4 +1290,4 @@ if __name__ == '__main__':
     MODELS_CONFIG = _startup_prompt()
 
     # Start Flask server
-    app.run(host='0.0.0.0', port=5846, debug=False, threaded=True)
+    app.run(host='127.0.0.1', port=5846, debug=False, threaded=True)
