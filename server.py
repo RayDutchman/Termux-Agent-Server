@@ -849,11 +849,15 @@ def chat_completions():
                 daemon=True
             )
             tool_exec_thread.start()
+            heartbeat_count = 0
             while tool_exec_thread.is_alive():
                 tool_exec_thread.join(timeout=3)
                 if tool_exec_thread.is_alive():
+                    heartbeat_count += 1
+                    log.info(f"[HEARTBEAT] Sending heartbeat #{heartbeat_count} while waiting for tools")
                     # Send a space heartbeat to keep SSE connection alive
                     yield _make_sse_chunk(content=" ", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+            log.info(f"[HEARTBEAT] Tool done after {heartbeat_count} heartbeats")
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
