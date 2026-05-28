@@ -849,14 +849,11 @@ def chat_completions():
                 daemon=True
             )
             tool_exec_thread.start()
-            elapsed_ticks = 0
             while tool_exec_thread.is_alive():
                 tool_exec_thread.join(timeout=5)
                 if tool_exec_thread.is_alive():
-                    elapsed_ticks += 1
-                    elapsed_sec = elapsed_ticks * 5
-                    # Append progress tick to keep SSE connection alive
-                    yield _make_sse_chunk(content=f"\n⏳ {elapsed_sec}s", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+                    # Send a space chunk to keep SSE connection alive
+                    yield _make_sse_chunk(content=" ", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
