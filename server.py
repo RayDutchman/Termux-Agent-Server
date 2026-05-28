@@ -841,9 +841,10 @@ def chat_completions():
                 role="assistant", model_id=model_id
             )
 
-            # Execute all tools in a background thread; append progress text every 5s
-            # within the same SSE message (no [DONE] until tool finishes) to keep
-            # Chatbox from timing out during long-running commands (e.g. tar, GPS).
+            # Execute all tools in a background thread; send a complete SSE message every 5s
+            # to keep Chatbox from timing out during long-running commands (e.g. tar, GPS).
+            # A complete message (with finish_reason=stop + DONE) is required — bare chunks
+            # without stop are ignored by Chatbox's timeout counter.
             tool_results_container = [None]
             tool_exec_thread = threading.Thread(
                 target=lambda: tool_results_container.__setitem__(0, execute_all_tool_calls(tool_calls)),
@@ -856,8 +857,12 @@ def chat_completions():
                 if tool_exec_thread.is_alive():
                     elapsed_ticks += 1
                     elapsed_sec = elapsed_ticks * 5
-                    # Append progress to the same message — no finish_reason/DONE yet
-                    yield _make_sse_chunk(content=f"\n⏳ {elapsed_sec}s", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+                    # Send a complete standalone message so Chatbox resets its timeout counter
+                    hb_id = f"chatcmpl-hb-{tool_round}-{elapsed_ticks}-{int(time.time())}"
+                    hb_created = int(time.time())
+                    yield _make_sse_chunk(content=f"⏳ {elapsed_sec}s", resp_id=hb_id, created=hb_created, role="assistant", model_id=model_id)
+                    yield _make_sse_chunk(finish_reason="stop", resp_id=hb_id, created=hb_created, model_id=model_id)
+                    yield b"data: [DONE]\n\n"
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
