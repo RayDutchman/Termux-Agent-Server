@@ -42,7 +42,7 @@ _FALLBACK_CONFIG = {
 
 
 def _load_models_config() -> dict:
-    """Load models_config.json, fall back to hardcoded defaults on failure."""
+    """Load models_config.json, fall back to an empty template on failure."""
     try:
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -102,7 +102,7 @@ def get_default_model_id() -> str:
     return MODELS_CONFIG.get("default_model", "claude-sonnet-4-6")
 
 
-# ==== 3. Tool Functions ====
+# ==== 2. Tool Functions ====
 
 def read_phone_file(filename):
     path = os.path.join(DOWNLOAD_DIR, filename)

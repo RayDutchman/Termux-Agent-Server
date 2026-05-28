@@ -4,13 +4,14 @@ An AI Agent server running in Android Termux environment, enabling AI to control
 
 ## Features
 
-- 🤖 **Multi-Model Support** - Dynamically load model lists, switch freely in Chatbox
-- 🔧 **Local Tool Execution** - 6 tools: file read/write, command execution, directory listing, file search, system status
-- 📱 **Termux-API Integration** - Support 40+ features: GPS, clipboard, notifications, TTS, camera, etc.
-- 💾 **Long-Term Memory** - Auto-load `~/memory.md`, compatible with Chatbox AI memory
-- 🔄 **Multi-Round Tool Calling** - Up to 20 rounds, max 5 tools per round, auto-batched execution
-- ⏱️ **Time Budget Mechanism** - 50s auto-interrupt to prevent client timeout
-- 🔌 **OpenAI Compatible** - Standard API interface, works with any OpenAI client
+- **Multi-Model Support** - Dynamically load model lists, switch freely in Chatbox
+- **Local Tool Execution** - 7 tools: file read/write, command execution, directory listing, file search, system status, global memory update
+- **Termux-API Integration** - Support 40+ features: GPS, clipboard, notifications, TTS, camera, etc.
+- **Long-Term Memory** - Auto-load `~/memory.md` (up to 8000 chars) on the first message of each new conversation
+- **Multi-Round Tool Calling** - Up to 20 rounds, auto-batched execution with real-time progress display
+- **Time Budget Mechanism** - 50s auto-interrupt to prevent client timeout
+- **SSE Heartbeat** - Space-char heartbeat every 5s during tool execution to prevent SSE idle timeout
+- **OpenAI Compatible** - Standard API interface, works with any OpenAI client
 
 ## Quick Start
 
@@ -94,6 +95,8 @@ tail -f ~/server.log
    - **API URL**: `http://phone-ip:5846` (use `hostname -I` to check IP)
    - **API Key**: any value
 
+> **Tip**: In Chatbox conversation settings, limit "Context Messages" to around 10 to prevent excessively long conversations from causing upstream token limit errors.
+
 ## Available Tools
 
 | Tool | Function | Example |
@@ -104,6 +107,7 @@ tail -f ~/server.log
 | `list_phone_dir` | List directory | "List current directory" |
 | `search_phone_files` | Search files | "Search all .py files" |
 | `get_phone_system_status` | System status | "Get battery and memory" |
+| `update_global_memory` | Update memory.md | "Remember that I prefer Python" |
 
 ### Termux-API Support
 
@@ -152,13 +156,12 @@ python update_models.py set-default   # Set default model
 ### Restart Server
 
 ```bash
-pkill -f server.py
-nohup python server.py > ~/server.log 2>&1 &
+pkill -f server.py && nohup python server.py > ~/server.log 2>&1 &
 ```
 
 ### Long-Term Memory
 
-Create `~/memory.md`, AI will auto-load it in every conversation:
+Create `~/memory.md` — AI will auto-load it at the start of each new conversation (up to 8000 chars). Use the `update_global_memory` tool to let AI update it during a conversation.
 
 ```bash
 echo "# My Memory\n\n- I prefer Python\n- My projects are in ~/projects" > ~/memory.md
@@ -214,13 +217,9 @@ Check `[TOOL]` info in logs:
 tail -50 ~/server.log | grep TOOL
 ```
 
-### AI Memory Loss
+### AI Repeats Tool Calls or Gets 502 Error
 
-Check session management:
-
-```bash
-tail -50 ~/server.log | grep conv_id
-```
+This is usually caused by an overly long conversation history exceeding the upstream provider's token limit. Fix: in Chatbox conversation settings, set "Context Messages" to 10 or fewer.
 
 ### View Logs
 
@@ -239,19 +238,11 @@ tail -f ~/server.log | grep -E "ERROR|WARNING"
 
 ### POST /v1/chat/completions
 
-OpenAI-compatible chat interface.
+OpenAI-compatible chat interface. The server is fully stateless — Chatbox owns the conversation history.
 
 ### GET /v1/models
 
-List all available models.
-
-### DELETE /v1/sessions
-
-Clear all session history.
-
-### DELETE /v1/sessions/{conv_id}
-
-Clear specific session.
+List all available models from `models_config.json`.
 
 ## Configuration
 
@@ -266,7 +257,7 @@ TOOL_OUTPUT_MAX_CHARS = 8000            # Tool output limit
 
 ```
 AIPhoneTools/
-├── server.py              # Main server
+├── server.py                     # Main server
 ├── update_models.py              # Model management tool
 ├── models_config.json            # API config (not committed)
 ├── models_config.example.json    # Config template
@@ -283,24 +274,29 @@ AIPhoneTools/
 
 ## Changelog
 
+### v2.1.0 (2026-05-28)
+
+**Improvements:**
+- Memory injection now only happens on the first message of a new conversation, avoiding redundant token usage in ongoing conversations
+- Raised memory.md read limit from 2000 to 8000 characters
+- Added `update_global_memory` tool length constraint (max 8000 chars total)
+
 ### v2.0.0 (2026-05-28)
 
 **Features:**
-- ✅ Multi-round tool calling loop (max 20 rounds)
-- ✅ Time budget mechanism (50s auto-interrupt)
-- ✅ Auto-load memory.md
-- ✅ Preserve Chatbox system messages
-- ✅ Termux-API command integration
-
-**Improvements:**
-- ✅ Session trimming by turn boundaries
+- Stateless design: Chatbox owns conversation history, no server-side session state
+- Multi-round tool calling loop (up to 20 rounds)
+- Time budget mechanism (50s auto-interrupt)
+- SSE heartbeat during tool execution (prevents idle timeout)
+- Auto-load memory.md into system prompt
+- Preserve Chatbox system messages
+- Termux-API command integration
 
 ### v1.0.0 (2026-05-26)
 
 **Initial Release:**
-- ✅ 6 local tools
-- ✅ Session history management
-- ✅ OpenAI-compatible interface
+- 6 local tools
+- OpenAI-compatible interface
 
 ## License
 
