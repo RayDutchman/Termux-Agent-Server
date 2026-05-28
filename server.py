@@ -817,7 +817,7 @@ def chat_completions():
                 except Exception:
                     arg_display = raw_args
                 if arg_display:
-                    display_parts.append(f"  - `{name}`\n    ```\n    {arg_display}\n    ```")
+                    display_parts.append(f"  - `{name}`\n```bash\n{arg_display}\n```")
                 else:
                     display_parts.append(f"  - `{name}`")
             tool_display = "\n".join(display_parts)
