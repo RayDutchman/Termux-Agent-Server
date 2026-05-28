@@ -10,12 +10,6 @@
           "name": "GPT-4o",
           "supports_tools": true,
           "max_tokens": 8192
-        },
-        {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
-          "supports_tools": true,
-          "max_tokens": 8192
         }
       ]
     }

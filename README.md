@@ -9,7 +9,7 @@ An AI Agent server running in Android Termux environment, enabling AI to control
 - **Termux-API Integration** - Support 40+ features: GPS, clipboard, notifications, TTS, camera, etc.
 - **Long-Term Memory** - Auto-load `~/memory.md` (up to 8000 chars) on the first message of each new conversation
 - **Multi-Round Tool Calling** - Up to 20 rounds, auto-batched execution with real-time progress display
-- **Time Budget Mechanism** - 50s auto-interrupt to prevent client timeout
+- **Runaway Guard** - Configurable time budget to stop runaway tool loops
 - **SSE Heartbeat** - Space-char heartbeat every 5s during tool execution to prevent SSE idle timeout
 - **OpenAI Compatible** - Standard API interface, works with any OpenAI client
 
@@ -61,8 +61,8 @@ nano models_config.json  # or use other editor
       "api_key": "sk-your-key-here",
       "models": [
         {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
+          "id": "gpt-4o",
+          "name": "GPT-4o",
           "supports_tools": true,
           "max_tokens": 8192
         }
@@ -70,7 +70,7 @@ nano models_config.json  # or use other editor
     }
   },
   "default_provider": "openai",
-  "default_model": "claude-sonnet-4-6"
+  "default_model": "gpt-4o"
 }
 ```
 
@@ -183,17 +183,6 @@ chmod +x ~/start_server.sh
 ~/start_server.sh
 ```
 
-### SSH Remote Management
-
-```bash
-# Install and start SSH
-pkg install openssh -y
-sshd
-
-# Connect from PC (default port 8022)
-ssh -p 8022 u0_aXXX@phone-ip
-```
-
 ## Troubleshooting
 
 ### Chatbox Connection Failed
@@ -285,8 +274,8 @@ AIPhoneTools/
 
 **Features:**
 - Stateless design: Chatbox owns conversation history, no server-side session state
-- Multi-round tool calling loop (up to 20 rounds)
-- Time budget mechanism (50s auto-interrupt)
+- Multi-round tool calling loop (up to 50 rounds)
+- Time budget runaway guard (20 min default)
 - SSE heartbeat during tool execution (prevents idle timeout)
 - Auto-load memory.md into system prompt
 - Preserve Chatbox system messages

@@ -5,6 +5,7 @@ import time
 import shutil
 import logging
 import subprocess
+import threading
 import requests
 from flask import Flask, request, jsonify, Response
 
@@ -144,14 +145,14 @@ def execute_local_command(command=None, **kwargs):
         return "Error: No command provided"
     try:
         result = subprocess.run(
-            command, shell=True, text=True, capture_output=True, timeout=30
+            command, shell=True, text=True, capture_output=True, timeout=300
         )
         output = f"[Exit Code]: {result.returncode}\n[Stdout]:\n{result.stdout}\n[Stderr]:\n{result.stderr}"
         if len(output) > TOOL_OUTPUT_MAX_CHARS:
             output = output[:TOOL_OUTPUT_MAX_CHARS] + f"\n...[Output too long, truncated to {TOOL_OUTPUT_MAX_CHARS} chars]"
         return output
     except subprocess.TimeoutExpired:
-        return "Error: Command execution timeout (30s)"
+        return "Error: Command execution timeout (300s)"
     except Exception as e:
         return f"Error: Command execution failed. Reason: {str(e)}"
 
@@ -840,8 +841,20 @@ def chat_completions():
                 role="assistant", model_id=model_id
             )
 
-            # Execute all tools
-            tool_results = execute_all_tool_calls(tool_calls)
+            # Execute all tools in a background thread; send SSE heartbeat every 3s
+            # to prevent Chatbox SSE idle timeout during long-running commands (e.g. tar, GPS)
+            tool_results_container = [None]
+            tool_exec_thread = threading.Thread(
+                target=lambda: tool_results_container.__setitem__(0, execute_all_tool_calls(tool_calls)),
+                daemon=True
+            )
+            tool_exec_thread.start()
+            while tool_exec_thread.is_alive():
+                tool_exec_thread.join(timeout=3)
+                if tool_exec_thread.is_alive():
+                    # Send a space heartbeat to keep SSE connection alive
+                    yield _make_sse_chunk(content=" ", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+            tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 

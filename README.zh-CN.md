@@ -9,7 +9,7 @@
 - **Termux-API 集成** - 支持 GPS、剪贴板、通知、TTS、相机等 40+ 功能
 - **长期记忆** - 每次新会话的第一条消息时自动加载 `~/memory.md`（最多 8000 字符）
 - **多轮工具调用** - 最多 20 轮，自动分批执行，实时显示调用进度
-- **时间预算机制** - 50 秒自动中断，防止客户端 timeout
+- **失控保护** - 可配置时间预算，防止工具调用失控循环
 - **SSE 心跳** - 工具执行期间每 5 秒发送心跳，防止 SSE 空闲超时
 - **OpenAI 兼容** - 标准 API 接口，兼容任何 OpenAI 客户端
 
@@ -61,8 +61,8 @@ nano models_config.json  # 或用其他编辑器
       "api_key": "sk-your-key-here",
       "models": [
         {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
+          "id": "gpt-4o",
+          "name": "GPT-4o",
           "supports_tools": true,
           "max_tokens": 8192
         }
@@ -70,7 +70,7 @@ nano models_config.json  # 或用其他编辑器
     }
   },
   "default_provider": "openai",
-  "default_model": "claude-sonnet-4-6"
+  "default_model": "gpt-4o"
 }
 ```
 
@@ -183,18 +183,6 @@ chmod +x ~/start_server.sh
 ~/start_server.sh
 ```
 
-### SSH 远程管理
-
-```bash
-# 安装并启动 SSH
-pkg install openssh -y
-passwd  # 设置密码
-sshd    # 启动服务
-
-# 从电脑连接（默认端口 8022）
-ssh -p 8022 u0_aXXX@手机IP
-```
-
 ## 故障排查
 
 ### Chatbox 连接失败
@@ -286,8 +274,8 @@ AIPhoneTools/
 ### v2.0.0 (2026-05-28)
 
 - 无状态设计：对话历史由 Chatbox 管理，服务器不保存 session
-- 多轮工具调用循环（最多 20 轮）
-- 时间预算机制（50 秒自动中断）
+- 多轮工具调用循环（最多 50 轮）
+- 时间预算失控保护（默认 20 分钟）
 - 工具执行期间 SSE 心跳（防止空闲超时）
 - 自动加载 memory.md 到 system prompt
 - 保留 Chatbox system 消息
