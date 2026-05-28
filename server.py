@@ -349,7 +349,7 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "Content to add or replace in global memory"},
+                    "content": {"type": "string", "description": "Content to add or replace in global memory. Total memory.md must not exceed 8000 characters."},
                     "mode": {
                         "type": "string",
                         "enum": ["append", "prepend", "replace"],
@@ -578,7 +578,7 @@ def chat_completions():
     if is_new_conversation and os.path.exists(GLOBAL_MEMORY_PATH):
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
-                memory_content = f.read(2000)  # Limit to 2000 chars
+                memory_content = f.read(8000)  # Limit to 8000 chars
             # Sanity check: skip if content looks like binary/corrupted data
             # (printable chars should make up >80% of valid markdown)
             if memory_content.strip():
