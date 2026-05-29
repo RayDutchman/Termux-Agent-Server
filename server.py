@@ -898,7 +898,7 @@ def chat_completions():
                 # write_phone_file: only show first line (success/error status)
                 if name == "write_phone_file":
                     result_content = result_content.split('\n')[0]
-                result_parts.append(f"\n**Output** `{name}`:\n```\n{result_content.rstrip()}\n```")
+                result_parts.append(f"\n**Output** `{name}`:\n```bash\n{result_content.rstrip()}\n```")
             if result_parts:
                 yield _make_sse_chunk(
                     content="\n".join(result_parts) + "\n",
