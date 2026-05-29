@@ -890,7 +890,11 @@ def chat_completions():
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
-            # Append tool results to the tool hint bubble
+            # End tool execution hint message
+            yield _make_sse_chunk(finish_reason="stop", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+            yield b"data: [DONE]\n\n"
+
+            # Send tool results as a separate independent message bubble
             result_parts = []
             for tc, tr in zip(tool_calls, tool_results):
                 name = tc.get('function', {}).get('name', 'unknown')
@@ -898,16 +902,17 @@ def chat_completions():
                 # write_phone_file: only show first line (success/error status)
                 if name == "write_phone_file":
                     result_content = result_content.split('\n')[0]
-                result_parts.append(f"\n**Output** `{name}`:\n```txt\n{result_content}\n```\n\n")
+                result_parts.append(f"**Output** `{name}`:\n```txt\n{result_content}\n```")
             if result_parts:
+                out_resp_id = f"chatcmpl-out-{tool_round}-{int(time.time())}"
+                out_created = int(time.time())
                 yield _make_sse_chunk(
-                    content="\n".join(result_parts) + "\n\n",
-                    resp_id=tool_resp_id, created=tool_created, model_id=model_id
+                    content="\n\n".join(result_parts),
+                    resp_id=out_resp_id, created=out_created,
+                    role="assistant", model_id=model_id
                 )
-
-            # End tool execution hint message
-            yield _make_sse_chunk(finish_reason="stop", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
-            yield b"data: [DONE]\n\n"
+                yield _make_sse_chunk(finish_reason="stop", resp_id=out_resp_id, created=out_created, model_id=model_id)
+                yield b"data: [DONE]\n\n"
 
             # Send next round request (with tool definitions, AI may continue calling tools)
             log.info(f"[stream] Sending round {tool_round + 1} request, messages={len(messages)}")
