@@ -18,8 +18,8 @@ import json
 import time
 import requests
 
-# Config file path (same directory as server.py)
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
+# Config file path (home directory, same as memory.md and credentials.json)
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), "models_config.json")
 
 # Default empty config structure
 DEFAULT_CONFIG = {

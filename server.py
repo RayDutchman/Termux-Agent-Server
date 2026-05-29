@@ -31,7 +31,7 @@ GLOBAL_MEMORY_PATH = os.path.join(DOWNLOAD_DIR, "memory.md")
 # ==== 1b. Multi-model config loading ====
 # Load models_config.json on startup; fall back to an empty template if missing.
 
-_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
+_CONFIG_PATH = os.path.join(os.path.expanduser("~"), "models_config.json")
 
 # Empty template — no hardcoded provider or key.
 # If models_config.json is missing, the startup prompt will force the user
