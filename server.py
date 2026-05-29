@@ -58,7 +58,19 @@ def _load_models_config() -> dict:
         return _FALLBACK_CONFIG
 
 
-# Load once at startup; restart service after update_models.py modifies config
+_CREDENTIALS_EXAMPLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json.example")
+
+def _load_credentials_example() -> str:
+    """Load credentials.json.example for embedding in system prompt."""
+    try:
+        with open(_CREDENTIALS_EXAMPLE_PATH, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return '{"credentials": [{"name", "note", "url", "port", "username", "password", "api_key", "token", "cert_path"}], "locations": {"home": {"lat", "lng", "address"}, "work": {...}}}'
+
+_CREDENTIALS_EXAMPLE = _load_credentials_example()
+
+
 MODELS_CONFIG: dict = _load_models_config()
 
 
@@ -602,8 +614,7 @@ def chat_completions():
         f"See 'termux-api --help' for full list.\n\n"
         f"Sensitive credentials are stored in ~/credentials.json (not in memory). "
         f"Use read_phone_file('credentials.json') to read it when needed. Never ask the user to provide credentials manually.\n"
-        f"File structure: {{\"credentials\": [{{\"name\", \"note\", \"url\", \"port\", \"username\", \"password\", \"api_key\", \"token\", \"cert_path\"}}], "
-        f"\"locations\": {{\"home\": {{\"lat\", \"lng\", \"address\"}}, \"work\": {{...}}}}}}"
+        f"File format (credentials.json.example):\n{_CREDENTIALS_EXAMPLE}"
     )
     
     # 2. Auto-load memory.md on every request.
