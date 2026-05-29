@@ -881,6 +881,21 @@ def chat_completions():
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
+            # Append tool results to the tool hint bubble
+            result_parts = []
+            for tc, tr in zip(tool_calls, tool_results):
+                name = tc.get('function', {}).get('name', 'unknown')
+                result_content = tr.get('content', '')
+                # write_phone_file: only show first line (success/error status)
+                if name == "write_phone_file":
+                    result_content = result_content.split('\n')[0]
+                result_parts.append(f"\n**Output** `{name}`:\n```\n{result_content}\n```")
+            if result_parts:
+                yield _make_sse_chunk(
+                    content="\n".join(result_parts),
+                    resp_id=tool_resp_id, created=tool_created, model_id=model_id
+                )
+
             # End tool execution hint message
             yield _make_sse_chunk(finish_reason="stop", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
             yield b"data: [DONE]\n\n"
