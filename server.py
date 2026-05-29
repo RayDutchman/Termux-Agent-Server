@@ -602,7 +602,7 @@ def chat_completions():
         f"See 'termux-api --help' for full list."
     )
     
-     # 2. Auto-load memory.md (only for new conversations, i.e. first message)
+    # 2. Auto-load memory.md (only for new conversations, i.e. first message)
     # For ongoing conversations (history > 1), memory was already injected in the
     # first request and is present in the conversation history - skip to avoid
     # redundant token usage and context bloat.
@@ -1016,7 +1016,6 @@ def chat_completions():
                 summary_resp = None
 
             if summary_resp is not None:
-                summary_collected = []
                 summary_buf = b""
                 first_text_seen = False
                 try:
@@ -1034,7 +1033,6 @@ def chat_completions():
                                 delta = d.get("choices", [{}])[0].get("delta", {})
                                 text = delta.get("content")
                                 if text:
-                                    summary_collected.append(text)
                                     yield _make_sse_chunk(
                                         content=text,
                                         resp_id=summary_resp_id, created=summary_created,
