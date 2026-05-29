@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import json
 import time
@@ -138,6 +139,28 @@ def write_phone_file(filename, content):
         return f"Error: Cannot write file. Reason: {str(e)}"
 
 
+_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b.')
+
+def _clean_output(text):
+    """Remove ANSI escape sequences and collapse \\r carriage-return overwrites."""
+    text = _ANSI_ESCAPE.sub('', text)
+    lines = text.split('\n')
+    cleaned = [line.split('\r')[-1] for line in lines]
+    return '\n'.join(cleaned)
+
+
+def _smart_truncate(text, max_chars):
+    """Truncate long output. If the tail contains error keywords, keep head+tail."""
+    if len(text) <= max_chars:
+        return text
+    error_keywords = ("error", "traceback", "exception", "failed", "errno", "fatal", "killed")
+    tail = text[-int(max_chars * 0.3):]
+    if any(k in tail.lower() for k in error_keywords):
+        head = text[:int(max_chars * 0.7)]
+        return head + "\n...[truncated]...\n" + tail
+    return text[:max_chars] + "\n...[truncated]"
+
+
 def execute_local_command(command=None, **kwargs):
     if command is None:
         command = kwargs.get("cmd") or kwargs.get("shell_command") or kwargs.get("shell") or ""
@@ -148,8 +171,8 @@ def execute_local_command(command=None, **kwargs):
             command, shell=True, text=True, capture_output=True, timeout=300
         )
         output = f"[Exit Code]: {result.returncode}\n[Stdout]:\n{result.stdout}\n[Stderr]:\n{result.stderr}"
-        if len(output) > TOOL_OUTPUT_MAX_CHARS:
-            output = output[:TOOL_OUTPUT_MAX_CHARS] + f"\n...[Output too long, truncated to {TOOL_OUTPUT_MAX_CHARS} chars]"
+        output = _clean_output(output)
+        output = _smart_truncate(output, TOOL_OUTPUT_MAX_CHARS)
         return output
     except subprocess.TimeoutExpired:
         return "Error: Command execution timeout (300s)"
