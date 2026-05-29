@@ -866,8 +866,9 @@ def chat_completions():
 
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
             tool_created = int(time.time())
+            prefix = "\n\n" if content else ""
             yield _make_sse_chunk(
-                content=f"\n\n**Running tools through server:**\n{tool_display}\n\n",
+                content=f"{prefix}**Running tools through server:**\n{tool_display}\n\n",
                 resp_id=tool_resp_id, created=tool_created,
                 role="assistant", model_id=model_id
             )
