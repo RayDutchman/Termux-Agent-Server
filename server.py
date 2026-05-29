@@ -602,11 +602,13 @@ def chat_completions():
         f"See 'termux-api --help' for full list."
     )
     
-    # 2. Auto-load memory.md: inject on round 1, then every 5 rounds thereafter.
-    # incoming length: round 1 = 1, round 2 = 3, round N = 2N-1
-    # So inject when len(incoming) == 1, or (len(incoming) - 1) % 10 == 0
-    msg_count = len(incoming)
-    should_inject_memory = (msg_count == 1) or (msg_count > 1 and (msg_count - 1) % 10 == 0)
+    # 2. Auto-load memory.md: inject on round 1, then every 5 user turns thereafter.
+    # Since server is stateless, we count user messages in incoming history.
+    # Chatbox truncation may cause early re-injection, which is acceptable
+    # (re-inject on truncation boundary is harmless and ensures memory is fresh).
+    # user_count = number of user messages in incoming (round N has N user messages)
+    user_count = sum(1 for m in incoming if m.get("role") == "user")
+    should_inject_memory = (user_count == 1) or (user_count > 1 and user_count % 5 == 1)
     if should_inject_memory and os.path.exists(GLOBAL_MEMORY_PATH):
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
@@ -619,15 +621,14 @@ def chat_completions():
                 if ratio < 0.8:
                     log.warning(f"[MEMORY] memory.md looks like binary data (printable ratio={ratio:.2f}), skipping")
                 else:
-                    round_num = (msg_count + 1) // 2
                     system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
-                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md (round {round_num})")
+                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md (user_turn={user_count})")
         except UnicodeDecodeError:
             log.warning("[MEMORY] memory.md is not valid UTF-8 text, skipping")
         except Exception as e:
             log.warning(f"[MEMORY] Failed to load memory.md: {e}")
     else:
-        log.info(f"[MEMORY] Skipped (history={msg_count} messages)")
+        log.info(f"[MEMORY] Skipped (user_turn={user_count})")
     
     # 3. Merge system message from Chatbox (if any)
     if chatbox_system_msgs:
