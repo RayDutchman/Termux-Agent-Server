@@ -837,7 +837,6 @@ def chat_completions():
 
             # Push tool calling hint to Chatbox (separate message bubble, show each call with args)
             display_parts = []
-            tc_arg_displays = []  # 保存每个工具的 arg_display，供 Output 复用
             for tc in tool_calls:
                 name = tc.get('function', {}).get('name', 'unknown')
                 raw_args = tc.get('function', {}).get('arguments', '')
@@ -858,7 +857,6 @@ def chat_completions():
                             arg_display = ""
                 except Exception:
                     arg_display = raw_args.strip()
-                tc_arg_displays.append(arg_display)
                 if arg_display:
                     lang = "bash" if name == "execute_local_command" else ""
                     display_parts.append(f"  - `{name}`\n```{lang}\n{arg_display}\n```")
@@ -894,14 +892,13 @@ def chat_completions():
 
             # Append tool results to the tool hint bubble before closing it
             result_parts = []
-            for tc, tr, arg_display in zip(tool_calls, tool_results, tc_arg_displays):
+            for tc, tr in zip(tool_calls, tool_results):
                 name = tc.get('function', {}).get('name', 'unknown')
                 result_content = tr.get('content', '')
                 # write_phone_file: only show first line (success/error status)
                 if name == "write_phone_file":
                     result_content = result_content.split('\n')[0]
-                label = arg_display if arg_display else name
-                result_parts.append(f"\n**Output** `{label}`:\n```text\n{result_content.rstrip()}\n```")
+                result_parts.append(f"\n**Output**:\n```text\n{result_content.rstrip()}\n```")
             if result_parts:
                 yield _make_sse_chunk(
                     content="\n".join(result_parts) + "\n",
