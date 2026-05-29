@@ -898,12 +898,10 @@ def chat_completions():
                 # write_phone_file: only show first line (success/error status)
                 if name == "write_phone_file":
                     result_content = result_content.split('\n')[0]
-                # Escape backtick sequences to prevent breaking the code block
-                result_content = result_content.replace('```', '` ` `')
                 result_parts.append(f"\n**Output** `{name}`:\n```\n{result_content}\n```")
             if result_parts:
                 yield _make_sse_chunk(
-                    content="\n\n".join(result_parts) + "\n\n",
+                    content="\n".join(result_parts) + "\n",
                     resp_id=tool_resp_id, created=tool_created, model_id=model_id
                 )
 
